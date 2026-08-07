@@ -124,7 +124,8 @@ describe('hydrateWorkspaceSession canonical terminal rows', () => {
       'canonical-tab': sharedPtyId,
       'recovery-tab': recoveryPtyId
     })
-    expect(state.activeTabId).toBeNull()
-    expect(state.activeTabIdByWorktree).toEqual({})
+    // The canonical row inherited the dropped row's PTY, so focus follows it instead of resetting.
+    expect(state.activeTabId).toBe('canonical-tab')
+    expect(state.activeTabIdByWorktree).toEqual({ [worktreeId]: 'canonical-tab' })
   })
 })

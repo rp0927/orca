@@ -36,7 +36,7 @@ import {
   parseLegacyNumericPaneKey,
   parsePaneKey
 } from '../../../../shared/stable-pane-id'
-import { isValidHostTerminalTabId, isValidTerminalTabId } from '../../../../shared/terminal-tab-id'
+import { isValidHostTerminalTabId } from '../../../../shared/terminal-tab-id'
 import { buildByIdIndex, buildWorktreeByIdIndex } from './worktree-by-id-index'
 import { resolveActiveTabOwnerWorktreeId } from './active-tab-owner-worktree'
 import { isSameCodexRestartNoticeAccount } from './codex-restart-notice-account-identity'
@@ -58,6 +58,10 @@ import { forgetForegroundTerminalTabs } from '@/lib/foreground-terminal-tabs'
 import { terminalLayoutEqual } from '@/lib/terminal-layout-equality'
 import { forgetAgentStartupDeliveriesForTabs } from '@/lib/agent-startup-delivery-guards'
 import { clearTransientTerminalState, emptyLayoutSnapshot } from './terminal-helpers'
+import {
+  hydrateWorkspaceTerminalRows,
+  releaseTerminalLayoutPtyIds
+} from './terminal-session-row-hydration'
 import {
   getRecentlyClosedTabPosition,
   pushClosedTerminalTabSnapshot,
@@ -490,17 +494,6 @@ function equalStringSets(a: readonly string[], b: readonly string[]): boolean {
 
 function uniquePtyIds(ptyIds: readonly (string | null | undefined)[]): string[] {
   return [...new Set(ptyIds.filter((ptyId): ptyId is string => Boolean(ptyId)))]
-}
-
-function collectPersistedTerminalPtyIds(
-  session: WorkspaceSessionState,
-  tab: TerminalTab
-): string[] {
-  return uniquePtyIds([
-    tab.ptyId,
-    session.remoteSessionIdsByTabId?.[tab.id],
-    ...Object.values(session.terminalLayoutsByTabId[tab.id]?.ptyIdsByLeafId ?? {})
-  ])
 }
 
 function resolvePrimaryLayoutPtyId(layout: TerminalLayoutSnapshot): string | null {
@@ -3949,65 +3942,34 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         validWorktreeIds.add(folderWorkspaceKey(workspace.id))
       }
       addAdditionalValidWorkspaceKeys(validWorktreeIds, options)
-      // Why: suppress restored mounts so only real activity updates Recent.
-      const tabsByWorktree: Record<string, TerminalTab[]> = Object.fromEntries(
-        Object.entries(session.tabsByWorktree)
-          .filter(([worktreeId]) => validWorktreeIds.has(worktreeId))
-          .map(([worktreeId, tabs]) => {
-            const canonicalTerminalIds = new Set(
-              (session.unifiedTabs?.[worktreeId] ?? []).flatMap((tab) =>
-                tab.contentType === 'terminal' ? [tab.entityId] : []
-              )
-            )
-            // Why: only rows that survive the id check can claim PTY ownership; a dropped invalid-id mirror must not evict the valid row sharing its PTY.
-            const canonicalPtyIds = new Set(
-              tabs
-                .filter((tab) => canonicalTerminalIds.has(tab.id) && isValidTerminalTabId(tab.id))
-                .flatMap((tab) => collectPersistedTerminalPtyIds(session, tab))
-            )
-            const quickCommandLabelByTerminalId = new Map(
-              (session.unifiedTabs?.[worktreeId] ?? [])
-                .filter((tab) => tab.contentType === 'terminal' && tab.quickCommandLabel?.trim())
-                .map((tab) => [tab.entityId, tab.quickCommandLabel!.trim()])
-            )
-            const aiVaultTitleByTerminalId = new Map(
-              (session.unifiedTabs?.[worktreeId] ?? [])
-                .filter((tab) => tab.contentType === 'terminal' && tab.aiVaultTitle)
-                .map((tab) => [tab.entityId, tab.aiVaultTitle!])
-            )
-            return [
+      // Why: rows for these keys came off the remote wire, which carries no unifiedTabs, so the
+      // session's canonical list describes a different snapshot and must not arbitrate their PTYs.
+      const remoteSnapshotWorkspaceKeys = new Set(
+        options?.directSshAuthority ? (options.replaceWorkspaceKeys ?? []) : []
+      )
+      const rowHydrationByWorktree = Object.entries(session.tabsByWorktree)
+        .filter(([worktreeId]) => validWorktreeIds.has(worktreeId))
+        .map(
+          ([worktreeId, tabs]) =>
+            [
               worktreeId,
-              [...tabs]
-                .filter((tab) => {
-                  // Why: canonical mounts win PTY ownership over stale legacy duplicates.
-                  // Why: old web-client mirrors could persist host surface ids with "::"; makePaneKey reserves ":" as its separator.
-                  const persistedPtyIds = collectPersistedTerminalPtyIds(session, tab)
-                  // Why: drop only rows the canonical mount fully subsumes; a split tab with one independent pane still owns a PTY nothing else can reattach.
-                  // Why: the length guard keeps `every` from swallowing PTY-less rows, which own nothing to duplicate.
-                  const isPureDuplicate =
-                    persistedPtyIds.length > 0 &&
-                    persistedPtyIds.every((ptyId) => canonicalPtyIds.has(ptyId))
-                  return (
-                    (canonicalTerminalIds.has(tab.id) || !isPureDuplicate) &&
-                    isValidTerminalTabId(tab.id)
-                  )
-                })
-                .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt)
-                .map((tab, index) => {
-                  const quickCommandLabel =
-                    tab.quickCommandLabel?.trim() || quickCommandLabelByTerminalId.get(tab.id)
-                  const aiVaultTitle = tab.aiVaultTitle ?? aiVaultTitleByTerminalId.get(tab.id)
-                  return {
-                    ...clearTransientTerminalState(tab, index),
-                    ...(quickCommandLabel ? { quickCommandLabel } : {}),
-                    ...(aiVaultTitle ? { aiVaultTitle } : {}),
-                    sortOrder: index,
-                    pendingActivationSpawn: true
-                  }
-                })
-            ]
-          })
+              hydrateWorkspaceTerminalRows(session, worktreeId, tabs, {
+                rowsFromRemoteSnapshot: remoteSnapshotWorkspaceKeys.has(worktreeId)
+              })
+            ] as const
+        )
+      const tabsByWorktree: Record<string, TerminalTab[]> = Object.fromEntries(
+        rowHydrationByWorktree
+          .map(([worktreeId, hydration]) => [worktreeId, hydration.rows] as const)
           .filter(([, tabs]) => tabs.length > 0)
+      )
+      const releasedPtyIdsByTabId = new Map<string, Set<string>>(
+        rowHydrationByWorktree.flatMap(([, hydration]) => [...hydration.releasedPtyIdsByTabId])
+      )
+      const canonicalTabIdBySubsumedTabId = new Map<string, string>(
+        rowHydrationByWorktree.flatMap(([, hydration]) => [
+          ...hydration.canonicalTabIdBySubsumedTabId
+        ])
       )
 
       const validTabIds = new Set(
@@ -4015,11 +3977,21 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
           .flat()
           .map((tab) => tab.id)
       )
-      const sleepingAgentSessionsByPaneKey = Object.fromEntries(
+      let sleepingAgentSessionsByPaneKey = Object.fromEntries(
         Object.entries(session.sleepingAgentSessionsByPaneKey ?? {}).filter(([, record]) =>
           validWorktreeIds.has(record.worktreeId)
         )
       )
+      // Why: a subsumed row is dropped rather than retired, so nothing else clears the sleeping
+      // records keyed to it and the workspace keeps a pane nobody can wake.
+      for (const [, hydration] of rowHydrationByWorktree) {
+        for (const tabId of hydration.subsumedTabIds) {
+          sleepingAgentSessionsByPaneKey = removeSleepingAgentSessionsForTab(
+            sleepingAgentSessionsByPaneKey,
+            tabId
+          )
+        }
+      }
       const fallbackActiveWorktreeId =
         !session.activeWorktreeId && session.activeRepoId && knownRepoIds.has(session.activeRepoId)
           ? (runtimeSessionPlaceholders.worktreesByRepo[session.activeRepoId]?.find(
@@ -4047,8 +4019,13 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         activeWorkspaceKey && session.activeWorkspaceExecutionHostId
           ? session.activeWorkspaceExecutionHostId
           : null
+      // Why: follow a subsumed row to the canonical twin that inherited its PTY, else the app
+      // restarts with no active terminal even though the same session is still mounted.
+      const restoredActiveTabId = session.activeTabId
+        ? (canonicalTabIdBySubsumedTabId.get(session.activeTabId) ?? session.activeTabId)
+        : null
       const activeTabId =
-        session.activeTabId && validTabIds.has(session.activeTabId) ? session.activeTabId : null
+        restoredActiveTabId && validTabIds.has(restoredActiveTabId) ? restoredActiveTabId : null
       const activeRepoId =
         session.activeRepoId &&
         runtimeSessionPlaceholders.repos.some((repo) => repo.id === session.activeRepoId)
@@ -4092,7 +4069,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         }
         const rawTabs = session.tabsByWorktree[worktreeId] ?? []
         for (const tab of rawTabs) {
-          if (tab.ptyId && validTabIds.has(tab.id)) {
+          // Why: a released PTY belongs to the canonical row now; reattaching it here would restore the duplicate ownership.
+          if (
+            tab.ptyId &&
+            validTabIds.has(tab.id) &&
+            !releasedPtyIdsByTabId.get(tab.id)?.has(tab.ptyId)
+          ) {
             pendingReconnectPtyIdByTabId[tab.id] = tab.ptyId
           }
         }
@@ -4100,7 +4082,7 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
 
       // Why: remote PTY reattach uses the relay's pty.attach RPC, not the local daemon; the loop above skips SSH repos, so no overlap.
       for (const [tabId, sessionId] of Object.entries(remoteSessionIds)) {
-        if (validTabIds.has(tabId)) {
+        if (validTabIds.has(tabId) && !releasedPtyIdsByTabId.get(tabId)?.has(sessionId)) {
           pendingReconnectPtyIdByTabId[tabId] = sessionId
         }
       }
@@ -4109,8 +4091,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       let activeTabIdByWorktree: Record<string, string | null> = {}
       if (session.activeTabIdByWorktree) {
         for (const [wId, tabId] of Object.entries(session.activeTabIdByWorktree)) {
-          if (validWorktreeIds.has(wId) && tabId && validTabIds.has(tabId)) {
-            activeTabIdByWorktree[wId] = tabId
+          if (!validWorktreeIds.has(wId) || !tabId) {
+            continue
+          }
+          // Why: a subsumed row's canonical twin holds the same PTY, so follow the pointer there
+          // instead of forgetting which terminal the workspace last focused.
+          const restored = validTabIds.has(tabId) ? tabId : canonicalTabIdBySubsumedTabId.get(tabId)
+          if (restored && validTabIds.has(restored)) {
+            activeTabIdByWorktree[wId] = restored
           }
         }
       } else {
@@ -4209,7 +4197,11 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         terminalLayoutsByTabId: Object.fromEntries(
           Object.entries(session.terminalLayoutsByTabId)
             .filter(([tabId]) => validTabIds.has(tabId))
-            .map(([tabId, layout]) => {
+            .map(([tabId, persisted]) => {
+              const releasedPtyIds = releasedPtyIdsByTabId.get(tabId)
+              const layout = releasedPtyIds
+                ? releaseTerminalLayoutPtyIds(persisted, releasedPtyIds)
+                : persisted
               // Why: old sessions can contain renderer-local pane:1-style leaf ids; normalize before runtime/mobile surfaces read them.
               const normalization = normalizeTerminalLayoutSnapshot(layout)
               const normalized = normalization.snapshot

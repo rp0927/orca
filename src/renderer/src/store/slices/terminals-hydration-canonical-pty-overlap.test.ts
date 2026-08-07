@@ -152,6 +152,68 @@ describe('hydrateWorkspaceSession canonical PTY overlap', () => {
     ).toContain(soloPtyId)
   })
 
+  it('ignores a canonical row’s stale leaf binding when scoring another row’s live PTY', () => {
+    const canonicalPtyId = 'daemon-canonical'
+    const livePtyId = 'daemon-live'
+    const session = makeSession({
+      tabs: [
+        makeTab({ id: 'canonical-tab', worktreeId: WORKTREE_ID, ptyId: canonicalPtyId }),
+        makeTab({ id: 'live-tab', worktreeId: WORKTREE_ID, ptyId: livePtyId, sortOrder: 1 })
+      ],
+      layouts: {
+        // 'ghost-leaf' left the tree but its binding was never pruned, so it must not claim livePtyId.
+        'canonical-tab': {
+          root: { type: 'leaf', leafId: 'canonical-leaf' },
+          activeLeafId: 'canonical-leaf',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'canonical-leaf': canonicalPtyId, 'ghost-leaf': livePtyId }
+        },
+        'live-tab': { ...makeLayout(), ptyIdsByLeafId: { 'live-leaf': livePtyId } }
+      },
+      canonicalEntityIds: ['canonical-tab']
+    })
+
+    const state = hydrate(session).getState()
+
+    expect(state.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'live-tab'
+    ])
+    expect(state.pendingReconnectPtyIdByTabId['live-tab']).toBe(livePtyId)
+  })
+
+  it('strips a retained row’s stale binding to a PTY the canonical row owns', () => {
+    const sharedPtyId = 'daemon-shared'
+    const soloPtyId = 'daemon-solo'
+    const session = makeSession({
+      tabs: [
+        makeTab({ id: 'canonical-tab', worktreeId: WORKTREE_ID, ptyId: sharedPtyId }),
+        makeTab({ id: 'legacy-tab', worktreeId: WORKTREE_ID, ptyId: soloPtyId, sortOrder: 1 })
+      ],
+      layouts: {
+        'canonical-tab': { ...makeLayout(), ptyIdsByLeafId: { 'canonical-leaf': sharedPtyId } },
+        'legacy-tab': {
+          root: { type: 'leaf', leafId: 'leaf-a' },
+          activeLeafId: 'leaf-a',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-a': soloPtyId, 'ghost-leaf': sharedPtyId }
+        }
+      },
+      canonicalEntityIds: ['canonical-tab']
+    })
+
+    const state = hydrate(session).getState()
+
+    expect(state.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'legacy-tab'
+    ])
+    // Why: reconnect publishes every recorded leaf PTY, so a leftover binding would re-duplicate ownership.
+    expect(Object.values(state.terminalLayoutsByTabId['legacy-tab']?.ptyIdsByLeafId ?? {})).toEqual(
+      [soloPtyId]
+    )
+  })
+
   it('retains a non-canonical row that owns no PTY at all', () => {
     const sharedPtyId = 'daemon-shared'
     const session = makeSession({
