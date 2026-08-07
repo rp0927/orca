@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkspaceSessionState } from '../../../../shared/types'
 import { getDefaultWorkspaceSession } from '../../../../shared/constants'
+import { buildWorkspaceSessionPayload } from '@/lib/workspace-session'
 import { createTestStore, makeLayout, makeTab, makeWorktree, seedStore } from './store-test-helpers'
 
 vi.mock('sonner', () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }))
@@ -22,10 +23,11 @@ const apiProxy = (): unknown =>
 globalThis.window = { api: apiProxy() }
 
 describe('hydrateWorkspaceSession canonical terminal rows', () => {
-  it('restores only canonical terminal rows from unified sessions', () => {
+  it('drops only legacy rows that duplicate canonical PTY ownership', () => {
     const store = createTestStore()
     const worktreeId = 'repo1::/wt-1'
     const sharedPtyId = 'daemon-session-1'
+    const recoveryPtyId = 'daemon-session-2'
     seedStore(store, {
       worktreesByRepo: {
         repo1: [makeWorktree({ id: worktreeId, repoId: 'repo1', path: '/wt-1' })]
@@ -42,7 +44,8 @@ describe('hydrateWorkspaceSession canonical terminal rows', () => {
       tabsByWorktree: {
         [worktreeId]: [
           makeTab({ id: 'canonical-tab', worktreeId, ptyId: sharedPtyId }),
-          makeTab({ id: 'stale-tab', worktreeId, ptyId: sharedPtyId })
+          makeTab({ id: 'stale-tab', worktreeId, ptyId: sharedPtyId }),
+          makeTab({ id: 'recovery-tab', worktreeId, ptyId: recoveryPtyId })
         ]
       },
       terminalLayoutsByTabId: {
@@ -53,11 +56,16 @@ describe('hydrateWorkspaceSession canonical terminal rows', () => {
         'stale-tab': {
           ...makeLayout(),
           ptyIdsByLeafId: { 'stale-leaf': sharedPtyId }
+        },
+        'recovery-tab': {
+          ...makeLayout(),
+          ptyIdsByLeafId: { 'recovery-leaf': recoveryPtyId }
         }
       },
       remoteSessionIdsByTabId: {
         'canonical-tab': sharedPtyId,
-        'stale-tab': sharedPtyId
+        'stale-tab': sharedPtyId,
+        'recovery-tab': recoveryPtyId
       },
       unifiedTabs: {
         [worktreeId]: [
@@ -91,16 +99,30 @@ describe('hydrateWorkspaceSession canonical terminal rows', () => {
     store.getState().hydrateTabsSession(session)
     const reconciliation = store.getState().reconcileWorktreeTabModel(worktreeId)
     const state = store.getState()
+    const persisted = buildWorkspaceSessionPayload(state)
 
-    expect(reconciliation.renderableTabCount).toBe(1)
+    expect(reconciliation.renderableTabCount).toBe(2)
     expect(state.unifiedTabsByWorktree[worktreeId]?.map((tab) => tab.entityId)).toEqual([
-      'canonical-tab'
+      'canonical-tab',
+      'recovery-tab'
     ])
-    expect(state.tabsByWorktree[worktreeId]?.map((tab) => tab.id)).toEqual(['canonical-tab'])
+    expect(state.tabsByWorktree[worktreeId]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'recovery-tab'
+    ])
     expect(state.terminalLayoutsByTabId['stale-tab']).toBeUndefined()
-    expect(state.pendingReconnectTabByWorktree[worktreeId]).toEqual(['canonical-tab'])
+    expect(persisted.tabsByWorktree[worktreeId]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'recovery-tab'
+    ])
+    expect(persisted.terminalLayoutsByTabId['stale-tab']).toBeUndefined()
+    expect(state.pendingReconnectTabByWorktree[worktreeId]).toEqual([
+      'canonical-tab',
+      'recovery-tab'
+    ])
     expect(state.pendingReconnectPtyIdByTabId).toEqual({
-      'canonical-tab': sharedPtyId
+      'canonical-tab': sharedPtyId,
+      'recovery-tab': recoveryPtyId
     })
     expect(state.activeTabId).toBeNull()
     expect(state.activeTabIdByWorktree).toEqual({})
