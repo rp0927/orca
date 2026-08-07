@@ -1,0 +1,176 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { Tab, TerminalTab, WorkspaceSessionState } from '../../../../shared/types'
+import { getDefaultWorkspaceSession } from '../../../../shared/constants'
+import { buildWorkspaceSessionPayload } from '@/lib/workspace-session'
+import { createTestStore, makeLayout, makeTab, makeWorktree, seedStore } from './store-test-helpers'
+
+vi.mock('sonner', () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }))
+vi.mock('@/runtime/sync-runtime-graph', () => ({
+  scheduleRuntimeGraphSync: vi.fn()
+}))
+vi.mock('@/components/terminal-pane/pty-transport', () => ({
+  registerEagerPtyBuffer: vi.fn(),
+  ensurePtyDispatcher: vi.fn()
+}))
+
+const apiProxy = (): unknown =>
+  new Proxy(() => undefined, {
+    get: (_target, prop) => (prop === 'then' ? undefined : apiProxy()),
+    apply: () => Promise.resolve(null)
+  })
+
+// @ts-expect-error -- mocked browser preload API
+globalThis.window = { api: apiProxy() }
+
+const WORKTREE_ID = 'repo1::/wt-1'
+
+function makeCanonicalUnifiedTab(entityId: string, sortOrder: number): Tab {
+  return {
+    id: `unified-${entityId}`,
+    entityId,
+    groupId: 'group-1',
+    worktreeId: WORKTREE_ID,
+    contentType: 'terminal',
+    label: 'Grok',
+    customLabel: null,
+    color: null,
+    sortOrder,
+    createdAt: 1
+  }
+}
+
+function makeSession(args: {
+  tabs: TerminalTab[]
+  layouts: WorkspaceSessionState['terminalLayoutsByTabId']
+  remoteSessionIdsByTabId?: Record<string, string>
+  canonicalEntityIds: string[]
+}): WorkspaceSessionState {
+  const unifiedTabs = args.canonicalEntityIds.map((entityId, index) =>
+    makeCanonicalUnifiedTab(entityId, index)
+  )
+  return {
+    ...getDefaultWorkspaceSession(),
+    activeRepoId: 'repo1',
+    activeWorktreeId: WORKTREE_ID,
+    activeWorktreeIdsOnShutdown: [WORKTREE_ID],
+    tabsByWorktree: { [WORKTREE_ID]: args.tabs },
+    terminalLayoutsByTabId: args.layouts,
+    remoteSessionIdsByTabId: args.remoteSessionIdsByTabId,
+    unifiedTabs: { [WORKTREE_ID]: unifiedTabs },
+    tabGroups: {
+      [WORKTREE_ID]: [
+        {
+          id: 'group-1',
+          worktreeId: WORKTREE_ID,
+          activeTabId: unifiedTabs[0]?.id ?? null,
+          tabOrder: unifiedTabs.map((tab) => tab.id)
+        }
+      ]
+    }
+  }
+}
+
+function hydrate(session: WorkspaceSessionState): ReturnType<typeof createTestStore> {
+  const store = createTestStore()
+  seedStore(store, {
+    worktreesByRepo: {
+      repo1: [makeWorktree({ id: WORKTREE_ID, repoId: 'repo1', path: '/wt-1' })]
+    }
+  })
+  store.getState().hydrateWorkspaceSession(session)
+  store.getState().hydrateTabsSession(session)
+  return store
+}
+
+describe('hydrateWorkspaceSession canonical PTY overlap', () => {
+  it('keeps the valid local row when an invalid-id canonical mirror shares its PTY', () => {
+    const sharedPtyId = 'daemon-session-1'
+    const mirrorTabId = 'host-tab::11111111-1111-4111-8111-111111111111'
+    const session = makeSession({
+      tabs: [
+        makeTab({ id: mirrorTabId, worktreeId: WORKTREE_ID, ptyId: sharedPtyId }),
+        makeTab({ id: 'local-tab', worktreeId: WORKTREE_ID, ptyId: sharedPtyId, sortOrder: 1 })
+      ],
+      layouts: {
+        [mirrorTabId]: { ...makeLayout(), ptyIdsByLeafId: { 'mirror-leaf': sharedPtyId } },
+        'local-tab': { ...makeLayout(), ptyIdsByLeafId: { 'local-leaf': sharedPtyId } }
+      },
+      canonicalEntityIds: [mirrorTabId]
+    })
+
+    const state = hydrate(session).getState()
+    const persisted = buildWorkspaceSessionPayload(state)
+
+    expect(state.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual(['local-tab'])
+    expect(state.pendingReconnectPtyIdByTabId['local-tab']).toBe(sharedPtyId)
+    expect(persisted.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual(['local-tab'])
+    expect(persisted.terminalLayoutsByTabId[mirrorTabId]).toBeUndefined()
+  })
+
+  it('keeps a legacy split tab whose second pane owns an independent PTY', () => {
+    const sharedPtyId = 'daemon-shared'
+    const soloPtyId = 'daemon-solo'
+    const session = makeSession({
+      tabs: [
+        makeTab({ id: 'canonical-tab', worktreeId: WORKTREE_ID, ptyId: sharedPtyId }),
+        makeTab({ id: 'split-tab', worktreeId: WORKTREE_ID, ptyId: soloPtyId, sortOrder: 1 })
+      ],
+      layouts: {
+        'canonical-tab': { ...makeLayout(), ptyIdsByLeafId: { 'canonical-leaf': sharedPtyId } },
+        'split-tab': {
+          root: {
+            type: 'split',
+            direction: 'vertical',
+            first: { type: 'leaf', leafId: 'leaf-a' },
+            second: { type: 'leaf', leafId: 'leaf-b' }
+          },
+          activeLeafId: 'leaf-a',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-a': sharedPtyId, 'leaf-b': soloPtyId }
+        }
+      },
+      canonicalEntityIds: ['canonical-tab']
+    })
+
+    const state = hydrate(session).getState()
+    const persisted = buildWorkspaceSessionPayload(state)
+
+    expect(state.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'split-tab'
+    ])
+    expect(state.pendingReconnectPtyIdByTabId['split-tab']).toBe(soloPtyId)
+    expect(
+      Object.values(state.terminalLayoutsByTabId['split-tab']?.ptyIdsByLeafId ?? {})
+    ).toContain(soloPtyId)
+    expect(persisted.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'split-tab'
+    ])
+    expect(
+      Object.values(persisted.terminalLayoutsByTabId['split-tab']?.ptyIdsByLeafId ?? {})
+    ).toContain(soloPtyId)
+  })
+
+  it('retains a non-canonical row that owns no PTY at all', () => {
+    const sharedPtyId = 'daemon-shared'
+    const session = makeSession({
+      tabs: [
+        makeTab({ id: 'canonical-tab', worktreeId: WORKTREE_ID, ptyId: sharedPtyId }),
+        makeTab({ id: 'empty-tab', worktreeId: WORKTREE_ID, ptyId: null, sortOrder: 1 })
+      ],
+      layouts: {
+        'canonical-tab': { ...makeLayout(), ptyIdsByLeafId: { 'canonical-leaf': sharedPtyId } },
+        'empty-tab': makeLayout()
+      },
+      canonicalEntityIds: ['canonical-tab']
+    })
+
+    const state = hydrate(session).getState()
+
+    expect(state.tabsByWorktree[WORKTREE_ID]?.map((tab) => tab.id)).toEqual([
+      'canonical-tab',
+      'empty-tab'
+    ])
+  })
+})

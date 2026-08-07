@@ -3959,9 +3959,10 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
                 tab.contentType === 'terminal' ? [tab.entityId] : []
               )
             )
+            // Why: only rows that survive the id check can claim PTY ownership; a dropped invalid-id mirror must not evict the valid row sharing its PTY.
             const canonicalPtyIds = new Set(
               tabs
-                .filter((tab) => canonicalTerminalIds.has(tab.id))
+                .filter((tab) => canonicalTerminalIds.has(tab.id) && isValidTerminalTabId(tab.id))
                 .flatMap((tab) => collectPersistedTerminalPtyIds(session, tab))
             )
             const quickCommandLabelByTerminalId = new Map(
@@ -3980,11 +3981,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
                 .filter((tab) => {
                   // Why: canonical mounts win PTY ownership over stale legacy duplicates.
                   // Why: old web-client mirrors could persist host surface ids with "::"; makePaneKey reserves ":" as its separator.
+                  const persistedPtyIds = collectPersistedTerminalPtyIds(session, tab)
+                  // Why: drop only rows the canonical mount fully subsumes; a split tab with one independent pane still owns a PTY nothing else can reattach.
+                  // Why: the length guard keeps `every` from swallowing PTY-less rows, which own nothing to duplicate.
+                  const isPureDuplicate =
+                    persistedPtyIds.length > 0 &&
+                    persistedPtyIds.every((ptyId) => canonicalPtyIds.has(ptyId))
                   return (
-                    (canonicalTerminalIds.has(tab.id) ||
-                      !collectPersistedTerminalPtyIds(session, tab).some((ptyId) =>
-                        canonicalPtyIds.has(ptyId)
-                      )) &&
+                    (canonicalTerminalIds.has(tab.id) || !isPureDuplicate) &&
                     isValidTerminalTabId(tab.id)
                   )
                 })
