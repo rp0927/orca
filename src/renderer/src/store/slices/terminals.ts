@@ -3943,6 +3943,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         Object.entries(session.tabsByWorktree)
           .filter(([worktreeId]) => validWorktreeIds.has(worktreeId))
           .map(([worktreeId, tabs]) => {
+            const canonicalTerminalIds =
+              session.unifiedTabs && session.tabGroups
+                ? new Set(
+                    (session.unifiedTabs[worktreeId] ?? []).flatMap((tab) =>
+                      tab.contentType === 'terminal' ? [tab.entityId] : []
+                    )
+                  )
+                : null
             const quickCommandLabelByTerminalId = new Map(
               (session.unifiedTabs?.[worktreeId] ?? [])
                 .filter((tab) => tab.contentType === 'terminal' && tab.quickCommandLabel?.trim())
@@ -3957,8 +3965,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
               worktreeId,
               [...tabs]
                 .filter((tab) => {
+                  // Why: canonical sessions use legacy rows only as terminal backing data; noncanonical rows are closed tabs, not migration candidates.
                   // Why: old web-client mirrors could persist host surface ids with "::"; makePaneKey reserves ":" as its separator.
-                  return isValidTerminalTabId(tab.id)
+                  return (
+                    (!canonicalTerminalIds || canonicalTerminalIds.has(tab.id)) &&
+                    isValidTerminalTabId(tab.id)
+                  )
                 })
                 .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt)
                 .map((tab, index) => {
