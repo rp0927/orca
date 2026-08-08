@@ -103,24 +103,50 @@ describe('STA-3077: one pane owns at most one live remote PTY lease', () => {
   })
 })
 
-describe('STA-3077: superseding a lease scrubs only the predecessor binding', () => {
-  it('drops the stale pane binding without disturbing the successor', async () => {
-    const store = await createStore()
-
-    // Spawn-shaped setup: the creating branches are intentionally allowed here.
+describe('STA-3077: superseding respects the durable pane binding', () => {
+  // Spawn-shaped setup: the creating branches are intentionally allowed here.
+  function bindPaneTo(store: Awaited<ReturnType<typeof createStore>>, ptyId: string) {
     store.persistPtyBinding({
       worktreeId: WORKTREE,
       tabId: TAB,
       leafId: LEAF,
-      ptyId: 'relay-pty-a',
-      incarnationId: 'inc-a'
+      ptyId,
+      incarnationId: `inc-${ptyId}`
     })
+  }
+
+  it('scrubs the predecessor binding when the arriving lease is the bound one', async () => {
+    const store = await createStore()
+    bindPaneTo(store, 'relay-pty-a')
+    store.upsertSshRemotePtyLease(leaseFor('relay-pty-a', 1))
+    bindPaneTo(store, 'relay-pty-b')
+    store.upsertSshRemotePtyLease(leaseFor('relay-pty-b', 2))
+
+    expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-b'])
+    const layout = store.getWorkspaceSession().terminalLayoutsByTabId?.[TAB]
+    expect(layout?.ptyIdsByLeafId?.[LEAF]).toBe('relay-pty-b')
+  })
+
+  // Expiring the bound predecessor here would detach a live pane, so both stay
+  // live and reattach arbitrates with the binding in hand.
+  it('defers instead of expiring the lease the pane is bound to', async () => {
+    const store = await createStore()
+    bindPaneTo(store, 'relay-pty-a')
     store.upsertSshRemotePtyLease(leaseFor('relay-pty-a', 1))
     store.upsertSshRemotePtyLease(leaseFor('relay-pty-b', 2))
 
-    const layout = store.getWorkspaceSession().terminalLayoutsByTabId?.[TAB]
-    expect(layout?.ptyIdsByLeafId?.[LEAF]).not.toBe('relay-pty-a')
-    expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-b'])
+    expect(
+      liveLeasesForPane(store)
+        .map((lease) => lease.ptyId)
+        .sort()
+    ).toEqual(['relay-pty-a', 'relay-pty-b'])
+    expect(store.getWorkspaceSession().terminalLayoutsByTabId?.[TAB]?.ptyIdsByLeafId?.[LEAF]).toBe(
+      'relay-pty-a'
+    )
+
+    // Arbitration keeps the bound lease, not the newer one.
+    expect(store.supersedeDuplicatePaneLeases(TARGET)).toBe(1)
+    expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-a'])
   })
 })
 
@@ -139,6 +165,26 @@ describe('STA-3077: existing duplicate leases are healed, not revived', () => {
 
     expect(retired).toBe(19)
     expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-19'])
+  })
+
+  // Recency alone would retire the lease the pane is actually bound to whenever a
+  // newer unbound lease exists, detaching a live pane instead of healing it.
+  it('keeps the durably bound lease even when an unbound one is newer', async () => {
+    const store = await createStore()
+    store.persistPtyBinding({
+      worktreeId: WORKTREE,
+      tabId: TAB,
+      leafId: LEAF,
+      ptyId: 'relay-pty-bound',
+      incarnationId: 'inc-bound'
+    })
+    store.upsertSshRemotePtyLease({ ...leaseFor('relay-pty-bound', 1), createdAt: 1 })
+    // Arrives later but no pane is bound to it.
+    store.upsertSshRemotePtyLease({ ...leaseFor('relay-pty-newer', 99), createdAt: 99 })
+
+    store.supersedeDuplicatePaneLeases(TARGET)
+
+    expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-bound'])
   })
 
   it('leaves distinct panes alone', async () => {

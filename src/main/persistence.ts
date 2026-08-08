@@ -7223,6 +7223,14 @@ export class Store {
     if (winner.state === 'terminated' || winner.state === 'expired') {
       return
     }
+    // Why consult the binding here: at upsert time the caller's lease may not be
+    // the one the pane is bound to yet. Expiring the bound predecessor would
+    // detach a live pane, so leave both live and let reattach arbitrate with the
+    // binding in hand.
+    const boundPtyId = this.durablyBoundPtyIdForPane(winner.targetId, winner.tabId, winner.leafId)
+    if (boundPtyId && boundPtyId !== winner.ptyId) {
+      return
+    }
     const superseded: SshRemotePtyLease[] = []
     for (const lease of this.state.sshRemotePtyLeases ?? []) {
       if (
@@ -7252,6 +7260,50 @@ export class Store {
    *
    * Returns the number of leases retired, for logging.
    */
+  /** The PTY a pane is durably bound to, across the target and local partitions. */
+  private durablyBoundPtyIdForPane(
+    targetId: string,
+    tabId: string,
+    leafId: string
+  ): string | undefined {
+    for (const session of [
+      this.state.workspaceSessionsByHostId?.[toSshExecutionHostId(targetId)],
+      this.state.workspaceSession
+    ]) {
+      const boundPtyId = session?.terminalLayoutsByTabId?.[tabId]?.ptyIdsByLeafId?.[leafId]
+      if (boundPtyId) {
+        return this.getRelayPtyIdForSshLeaseComparison(targetId, boundPtyId)
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The durable pane binding outranks recency. Picking the newest lease alone
+   * would retire the one the pane is actually bound to whenever a newer unbound
+   * lease exists, which detaches a live pane instead of healing it.
+   */
+  private outranksForPane(
+    candidate: SshRemotePtyLease,
+    incumbent: SshRemotePtyLease,
+    targetId: string
+  ): boolean {
+    const boundPtyId = this.durablyBoundPtyIdForPane(
+      targetId,
+      candidate.tabId ?? '',
+      candidate.leafId ?? ''
+    )
+    if (boundPtyId) {
+      if (incumbent.ptyId === boundPtyId) {
+        return false
+      }
+      if (candidate.ptyId === boundPtyId) {
+        return true
+      }
+    }
+    return isNewerSshRemotePtyLease(candidate, incumbent)
+  }
+
   supersedeDuplicatePaneLeases(targetId: string): number {
     const live = (this.state.sshRemotePtyLeases ?? []).filter(
       (lease) =>
@@ -7264,7 +7316,7 @@ export class Store {
       }
       const paneKey = [lease.worktreeId, lease.tabId, lease.leafId].join('\0')
       const incumbent = winnerByPane.get(paneKey)
-      if (!incumbent || isNewerSshRemotePtyLease(lease, incumbent)) {
+      if (!incumbent || this.outranksForPane(lease, incumbent, targetId)) {
         winnerByPane.set(paneKey, lease)
       }
     }
