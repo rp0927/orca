@@ -274,6 +274,26 @@ const ptyPaneKey = new Map<string, string>()
 // Why: reverse of ptyPaneKey — callers with a paneKey from outside the PTY lifecycle (e.g. agent-hook status routing) need the ptyId; kept in lock-step via the same sites.
 const paneKeyPtyId = new Map<string, string>()
 
+/**
+ * True only when this PTY's own pane has since bound a different PTY. The two
+ * maps above are maintained in lock-step, so their disagreement is proof the id
+ * was superseded — a renderer that queued work before a reattach cannot land it
+ * on the successor.
+ *
+ * Deliberately false when no paneKey is recorded: an unowned or orphaned PTY is
+ * unknown, not stale, and unknown never authorizes refusing an explicit
+ * operation. That is also what keeps orphan cleanup working, since those ids
+ * have no pane by construction.
+ */
+function isSupersededPtyId(ptyId: string): boolean {
+  const paneKey = ptyPaneKey.get(ptyId)
+  if (paneKey === undefined) {
+    return false
+  }
+  const currentPtyId = paneKeyPtyId.get(paneKey)
+  return currentPtyId !== undefined && currentPtyId !== ptyId
+}
+
 const AGENT_HOOK_RUNTIME_ENV_KEYS = [
   'ORCA_AGENT_HOOK_PORT',
   'ORCA_AGENT_HOOK_TOKEN',
@@ -6899,6 +6919,11 @@ export function registerPtyHandlers(
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
       return
     }
+    // Why here and not in the renderer: input queued before a reattach would
+    // otherwise land on whatever PTY now holds the pane.
+    if (isSupersededPtyId(args.id)) {
+      return
+    }
     const claimTail = hostViewportClaimTails.get(args.id)
     if (claimTail) {
       void claimTail.then((claimed) => (claimed ? writePtyInput(args) : false))
@@ -6908,6 +6933,9 @@ export function registerPtyHandlers(
   })
   ipcMain.handle('pty:writeAccepted', (event, args: unknown): boolean | Promise<boolean> => {
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
+      return false
+    }
+    if (isSupersededPtyId(args.id)) {
       return false
     }
     const claimTail = hostViewportClaimTails.get(args.id)
@@ -6946,6 +6974,10 @@ export function registerPtyHandlers(
   // Why: resize is fire-and-forget — ipcMain.on (not .handle) halves IPC traffic by skipping the empty acknowledgement reply.
   ipcMain.removeAllListeners('pty:resize')
   ipcMain.on('pty:resize', (_event, args: { id: string; cols: number; rows: number }) => {
+    // Why: a resize for a pane that has rebound would reshape the successor's shell.
+    if (isSupersededPtyId(args.id)) {
+      return
+    }
     // Why: after a desktop-fit override change the renderer's safeFit cascade re-measures ALL panes (background ones at full width), so suppress every pty:resize in this window to avoid corrupting PTY dimensions.
     if (runtime?.isResizeSuppressed()) {
       return
