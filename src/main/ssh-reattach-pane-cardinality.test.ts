@@ -277,3 +277,28 @@ describe('STA-3077: exact-binding compare-and-swap', () => {
     expect(stale).toBe(false)
   })
 })
+
+describe('STA-3077: the reattach path actually refuses to create', () => {
+  // This is the oracle the store-level tests could not provide: `mayCreate`
+  // existed and was correct, but no production caller passed it, so reattach
+  // still grafted panes. Pin the wiring, not just the capability.
+  it('passes mayCreate:false from the SSH reattach binding write', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync('src/main/ssh/ssh-relay-session.ts', 'utf-8')
+    const bindCall = source.slice(
+      source.indexOf('restoreReattachedPtyRuntime'),
+      source.indexOf('private async attachPtyWithRetry')
+    )
+    expect(bindCall).toContain('persistPtyBinding')
+    expect(bindCall).toContain('mayCreate: false')
+  })
+
+  it('has no production persistPtyBinding caller that can create during reattach', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync('src/main/ssh/ssh-relay-session.ts', 'utf-8')
+    // Every bind in the relay session is a reattach; none may grow topology.
+    const calls = source.split('persistPtyBinding(').length - 1
+    const guarded = source.split('mayCreate: false').length - 1
+    expect(guarded).toBeGreaterThanOrEqual(calls)
+  })
+})

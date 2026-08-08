@@ -435,12 +435,14 @@ describe('SshRelaySession reconnect incarnation ordering', () => {
       incarnationId
     })
     expect(runtime.onPtySpawned).not.toHaveBeenCalled()
+    // mayCreate:false — reattach binds an existing pane and never grafts one back.
     expect(mockStore.persistPtyBinding).toHaveBeenCalledWith({
       worktreeId: 'worktree-1',
       tabId: 'tab-1',
       leafId: INCARNATION_LEAF_ID,
       ptyId: APP_PTY_ID,
-      incarnationId
+      incarnationId,
+      mayCreate: false
     })
     expect(vi.mocked(mockStore.persistPtyBinding).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(mockStore.markSshRemotePtyLeasesAttachedAsync).mock.invocationCallOrder[0]!

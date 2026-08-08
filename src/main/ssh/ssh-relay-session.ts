@@ -2507,22 +2507,35 @@ export class SshRelaySession {
     lease: SshPtyLease | undefined
   ): void {
     if (lease?.worktreeId && lease.tabId && lease.leafId) {
+      // Why bind before registering: `mayCreate: false` refuses when the pane is
+      // gone, and registering first would surface a pane the user never opened.
+      // A thrown write is unknown, not a refusal, so it must not detach anything.
+      let bound: boolean | null = null
+      try {
+        bound = this.store.persistPtyBinding({
+          worktreeId: lease.worktreeId,
+          tabId: lease.tabId,
+          leafId: lease.leafId,
+          ptyId: appPtyId,
+          incarnationId,
+          mayCreate: false
+        })
+      } catch (error) {
+        console.error('[ssh-relay-session] Failed to persist reconnect incarnation:', error)
+      }
+      if (bound === false) {
+        // Unresolved, not dead: the remote shell keeps running and stays
+        // reattachable once a durable pane names it again.
+        console.info(
+          `[ssh-relay-session] No durable pane owns ${appPtyId} on ${this.targetId}; left running unbound.`
+        )
+        return
+      }
       this.runtime?.registerPty(appPtyId, lease.worktreeId, this.targetId, {
         tabId: lease.tabId,
         leafId: lease.leafId,
         incarnationId
       })
-      try {
-        this.store.persistPtyBinding({
-          worktreeId: lease.worktreeId,
-          tabId: lease.tabId,
-          leafId: lease.leafId,
-          ptyId: appPtyId,
-          incarnationId
-        })
-      } catch (error) {
-        console.error('[ssh-relay-session] Failed to persist reconnect incarnation:', error)
-      }
       return
     }
     this.runtime?.onPtySpawned(appPtyId, incarnationId, { awaitsRegistration: false })
