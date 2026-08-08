@@ -102,6 +102,8 @@ docs/**
 !docs/reference/relay-grace-time-reconfiguration.md
 !docs/reference/remote-wire-compatibility.md
 !docs/reference/terminal-session-behavior-contract.md
+!docs/reference/terminal-session-correctness-handoff-2026-08-07/
+!docs/reference/terminal-session-correctness-handoff-2026-08-07/**
 !docs/reference/windows-setup-shell.md
 !docs/reference/xterm-patch-regeneration.md
 
