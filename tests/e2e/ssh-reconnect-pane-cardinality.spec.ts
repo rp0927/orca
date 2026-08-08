@@ -43,6 +43,9 @@ const RECONNECT_CYCLES = 3
 // remote shells die too, reconnect degrades to a cold spawn, and the reattach
 // path this spec exists to bound is never entered.
 const RELAY_GRACE_PERIOD_SECONDS = 900
+// Why: a graft lands after reattach reports ready, so the census has to be
+// re-read once the dust settles rather than the instant the wait passes.
+const SETTLE_MS = 6_000
 
 test.use({ seedTestRepo: false })
 
@@ -198,15 +201,25 @@ test.describe('SSH reconnect pane and remote PTY cardinality', () => {
           `reconnect ${cycle} changed the workspace tabs`
         ).toEqual(baselinePanes.tabIds)
 
-        // Settle before the next cycle so a late graft is attributed to the
-        // reconnect that caused it instead of leaking into the next assertion.
-        await expect
-          .poll(() => readDockerSshRelayRemotePtys(relayTarget).map((pty) => pty.pid), {
-            intervals: [2_000, 2_000, 2_000],
-            timeout: 8_000,
-            message: `reconnect ${cycle} grew the remote shells after settling`
-          })
-          .toEqual(baselinePids)
+        // Why not poll here: poll returns on its first passing probe, so
+        // re-polling a value that already matched waits 0ms and observes
+        // nothing. Sit out the settle window, then re-read every dimension a
+        // late graft could move, so it is attributed to the reconnect that
+        // caused it instead of leaking into the next cycle.
+        await orcaPage.waitForTimeout(SETTLE_MS)
+        const settled = await readRemotePaneCensus(orcaPage, remote.worktreeId)
+        expect(
+          readDockerSshRelayRemotePtys(relayTarget).map((pty) => pty.pid),
+          `reconnect ${cycle} changed the remote shells after settling`
+        ).toEqual(baselinePids)
+        expect(
+          settled.paneIds,
+          `reconnect ${cycle} changed the visible terminal panes after settling`
+        ).toEqual(baselinePanes.paneIds)
+        expect(
+          settled.tabIds,
+          `reconnect ${cycle} changed the workspace tabs after settling`
+        ).toEqual(baselinePanes.tabIds)
       }
 
       testInfo.annotations.push({
