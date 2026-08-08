@@ -80,6 +80,40 @@ export function readDockerSshRelayRemotePtys(
     .sort((left, right) => left.pid - right.pid)
 }
 
+// Why not pgrep -f: the `bash -lc` running the probe carries the marker in its
+// own cmdline and would count itself. Requiring argv[0] to be node counts only
+// the writers the panes started.
+const COUNT_REMOTE_STREAM_WRITERS_COMMAND = `
+count=0
+for proc in /proc/[0-9]*; do
+  [ -r "$proc/cmdline" ] || continue
+  argv=()
+  mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+  [ "\${argv[0]##*/}" = node ] || continue
+  case "\${argv[*]}" in *MARKER*) count=$((count + 1)) ;; esac
+done
+printf '%s' "$count"
+`
+
+export function countDockerSshRelayRemoteStreamWriters(
+  target: DockerSshRelayTarget,
+  marker: string
+): number {
+  if (!/^[A-Za-z0-9_]+$/.test(marker)) {
+    throw new Error(`Stream marker must be shell-safe: ${marker}`)
+  }
+  const count = Number(
+    execDockerSshRelayTargetCommand(
+      target,
+      COUNT_REMOTE_STREAM_WRITERS_COMMAND.replace('MARKER', marker)
+    )
+  )
+  if (!Number.isInteger(count)) {
+    throw new Error(`Unexpected remote stream writer count for ${marker}`)
+  }
+  return count
+}
+
 export function describeDockerSshRelayRemotePtys(ptys: DockerSshRelayRemotePty[]): string {
   return ptys
     .map((pty) => `${pty.pid}@${pty.relayPid} ${pty.pts} pane=${pty.paneKey ?? '-'}`)

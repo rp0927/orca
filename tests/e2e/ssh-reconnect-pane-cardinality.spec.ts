@@ -2,6 +2,7 @@ import type { Page, TestInfo } from '@stablyai/playwright-test'
 import { test, expect } from './helpers/orca-app'
 import { ensureTerminalVisible, waitForActiveWorktree, waitForSessionReady } from './helpers/store'
 import {
+  sendToTerminal,
   splitActiveTerminalPane,
   waitForActivePanePtyId,
   waitForActiveTerminalManager,
@@ -12,11 +13,10 @@ import {
   startDockerSshRelayTarget,
   type DockerSshRelayTarget
 } from './helpers/docker-ssh-relay-target'
+import { connectDockerSshRelayTarget } from './helpers/docker-ssh-relay-connection'
+import { severDockerSshRelayTransport } from './helpers/docker-ssh-relay-processes'
 import {
-  connectDockerSshRelayTarget,
-  reconnectDockerSshRelayTarget
-} from './helpers/docker-ssh-relay-connection'
-import {
+  countDockerSshRelayRemoteStreamWriters,
   describeDockerSshRelayRemotePtys,
   readDockerSshRelayRemotePtys
 } from './helpers/docker-ssh-relay-remote-ptys'
@@ -24,12 +24,28 @@ import {
 const RUN_DOCKER_SSH = process.env.ORCA_E2E_SSH_DOCKER === '1'
 const PANE_COUNT = 2
 const RECONNECT_CYCLES = 3
-// Why: the relay must outlive every disconnect. If it exits with the client the
+// Why: the relay must outlive every fault. If it exits with the client the
 // remote shells die too, reconnect degrades to a cold spawn, and the reattach
 // path this spec exists to bound is never entered.
 const RELAY_GRACE_PERIOD_SECONDS = 900
 
 test.use({ seedTestRepo: false })
+
+async function waitForSshReconnected(page: Page, targetId: string): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          async (targetId) => (await window.api.ssh.getState({ targetId }))?.status ?? null,
+          targetId
+        ),
+      {
+        timeout: 120_000,
+        message: 'SSH target did not reconnect after its transport was severed'
+      }
+    )
+    .toBe('connected')
+}
 
 /** Every terminal pane the user can see in a workspace, keyed tab/leaf. */
 type RemotePaneCensus = {
@@ -98,9 +114,33 @@ test.describe('SSH reconnect pane and remote PTY cardinality', () => {
       await waitForActivePanePtyId(orcaPage, 60_000)
 
       await splitActiveTerminalPane(orcaPage, 'vertical')
-      await waitForPaneIdentitySnapshot(orcaPage, PANE_COUNT)
+      const paneSnapshot = await waitForPaneIdentitySnapshot(orcaPage, PANE_COUNT)
       const baselinePanes = await readRemotePaneCensus(orcaPage, remote.worktreeId)
       expect(baselinePanes.paneIds).toHaveLength(PANE_COUNT)
+
+      // Why every pane must be streaming: an idle pane carries no output source,
+      // so its reattach sends no recovery checkpoint and the relay answers
+      // 'existing'. Only a live source can come back needing re-establishment,
+      // which is the outcome that used to read as expiry and respawn the shell.
+      const streamMarker = `SSH_RECONNECT_STREAM_${Date.now()}`
+      const countRemoteStreamWriters = (): number =>
+        countDockerSshRelayRemoteStreamWriters(relayTarget, streamMarker)
+      for (const pane of paneSnapshot.panes) {
+        if (!pane.ptyId) {
+          throw new Error(`Pane ${pane.leafId} has no PTY to stream from`)
+        }
+        await sendToTerminal(
+          orcaPage,
+          pane.ptyId,
+          `node -e "setInterval(()=>process.stdout.write('${streamMarker}_'+Date.now()+'\\n'),25)"\r`
+        )
+      }
+      await expect
+        .poll(countRemoteStreamWriters, {
+          timeout: 60_000,
+          message: 'remote panes did not start streaming before the first transport fault'
+        })
+        .toBe(PANE_COUNT)
 
       // The remote census is the reporter's oracle: shells the relay hosts right
       // now, counted on the container rather than inferred from app state.
@@ -118,7 +158,8 @@ test.describe('SSH reconnect pane and remote PTY cardinality', () => {
       })
 
       for (let cycle = 1; cycle <= RECONNECT_CYCLES; cycle += 1) {
-        await reconnectDockerSshRelayTarget(orcaPage, remote.targetId)
+        severDockerSshRelayTransport(relayTarget)
+        await waitForSshReconnected(orcaPage, remote.targetId)
         await ensureTerminalVisible(orcaPage, 45_000)
         await waitForActiveTerminalManager(orcaPage, 60_000)
         await waitForActivePanePtyId(orcaPage, 60_000)
