@@ -86,6 +86,16 @@ function readOsProcessIdentity(pid: number): OsProcessIdentity {
 }
 
 async function readPaneBinding(page: Page): Promise<PaneBinding> {
+  // Why poll: the binding is read off a DOM dataset attribute, and a reload
+  // remounts the pane before it republishes. A single read here failed every
+  // run on a slower host while the app was demonstrably healthy — the
+  // assertion is unchanged, it is just awaited.
+  await expect
+    .poll(async () => (await readPaneIdentitySnapshot(page))?.panes[0]?.ptyId ?? null, {
+      timeout: 30_000,
+      message: 'No bound terminal pane is mounted'
+    })
+    .not.toBeNull()
   const snapshot = await readPaneIdentitySnapshot(page)
   const pane = snapshot?.panes[0]
   if (!snapshot || !pane?.ptyId) {
