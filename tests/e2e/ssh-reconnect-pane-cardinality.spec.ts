@@ -1,3 +1,18 @@
+/**
+ * Forward regression guard for pane and remote-PTY cardinality across
+ * reconnects, run against a real OpenSSH container.
+ *
+ * Scope, stated honestly: this spec passes both with and without the STA-3077
+ * fixes — it was run against an unfixed tree and did not fail. A clean severed
+ * transport reconnects without producing the conditions that grafted panes in
+ * the field, which needed accumulated duplicate leases or a source that came
+ * back needing re-establishment. So it does NOT prove those fixes; the oracles
+ * that do are in `src/main/ssh-reattach-pane-cardinality.test.ts`.
+ *
+ * It still earns its place: it counts the shells the relay actually hosts, on
+ * the container, and pins their PIDs — so a future change that grafts a pane or
+ * kills and respawns a shell fails here.
+ */
 import type { Page, TestInfo } from '@stablyai/playwright-test'
 import { test, expect } from './helpers/orca-app'
 import { ensureTerminalVisible, waitForActiveWorktree, waitForSessionReady } from './helpers/store'
