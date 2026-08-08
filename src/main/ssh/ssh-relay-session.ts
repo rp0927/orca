@@ -135,10 +135,9 @@ const SSH_PTY_REATTACH_MAX_CONCURRENCY = 8
 const SSH_PTY_REATTACH_ATTEMPT_TIMEOUT_MS = 10_000
 const SSH_PTY_REATTACH_RETRY_MIN_DELAY_MS = 50
 const SSH_PTY_REATTACH_RETRY_JITTER_MS = 200
-const SSH_REJECTED_PTY_RECOVERY_MAX_ATTEMPTS = 2
-// Why a second ceiling: the consecutive budget resets whenever a reattach succeeds, so a PTY that
-// alternates recovered and rejected frames would otherwise reattach forever — each one costs a
-// store read, an attach round trip and a store write.
+// Why a ceiling at all: a PTY that alternates recovered and rejected frames would otherwise reattach
+// forever — each one costs a store read, an attach round trip and a store write. Exhausting it parks
+// this PTY's delivery; it never authorizes tearing anything down.
 const SSH_REJECTED_PTY_RECOVERY_MAX_GENERATION_ATTEMPTS = 12
 const SSH_REJECTED_PTY_RECOVERY_RETRY_DELAY_MS = 150
 const SSH_SOURCE_RECOVERY_CANCELLATION_FAILED = 'ssh_source_recovery_cancellation_failed'
@@ -339,7 +338,6 @@ export class SshRelaySession {
     string,
     {
       providerGeneration: number
-      attempts: number
       generationAttempts: number
       reported: boolean
     }
@@ -1831,26 +1829,21 @@ export class SshRelaySession {
     const attempt =
       previous?.providerGeneration === providerGeneration
         ? previous
-        : { providerGeneration, attempts: 0, generationAttempts: 0, reported: false }
-    if (
-      attempt.attempts >= SSH_REJECTED_PTY_RECOVERY_MAX_ATTEMPTS ||
-      attempt.generationAttempts >= SSH_REJECTED_PTY_RECOVERY_MAX_GENERATION_ATTEMPTS
-    ) {
+        : { providerGeneration, generationAttempts: 0, reported: false }
+    if (attempt.generationAttempts >= SSH_REJECTED_PTY_RECOVERY_MAX_GENERATION_ATTEMPTS) {
       if (!attempt.reported) {
         attempt.reported = true
+        // Why park instead of dropping the relay channel: a retry count is not proof of anything, and
+        // the channel is shared — dropping it rotates provider authority, aborts every in-flight fs
+        // and git request on the target and stalls every sibling PTY over one PTY's delivery. The
+        // remote shell keeps running, its lease stands, and the next relay open reattaches it with a
+        // fresh delivery generation.
         console.warn(
-          `[ssh-relay-session] PTY ${relayPtyId} delivery recovery exhausted for ${this.targetId}; dropping the relay channel to reconnect`
+          `[ssh-relay-session] PTY ${relayPtyId} delivery recovery exhausted for ${this.targetId}; parking its delivery until the next relay open`
         )
-        // Why a channel drop and not a terminal relay error: a terminal error clears the reconnect
-        // backoff, rotates provider authority (aborting every in-flight fs and git request on the
-        // target) and parks the target in a manual-recovery state — over one PTY's delivery. Losing
-        // the channel is the recoverable escalation, and it is what this path did before targeted
-        // recovery existed.
-        mux.dispose('connection_lost')
       }
       return
     }
-    attempt.attempts++
     attempt.generationAttempts++
     this.rejectedPtyRecoveryAttempts.set(appPtyId, attempt)
     void this.rejectedPtyReattaches
@@ -1866,13 +1859,9 @@ export class SshRelaySession {
       )
       .then(
         (recovered) => {
-          if (recovered) {
-            // Why only a completed reattach clears this: an accepted frame proves nothing about the
-            // delivery that was rejected, and resetting on one lets a flapping PTY reattach forever.
-            attempt.attempts = 0
-            return
+          if (!recovered) {
+            this.retryRejectedPtyDelivery(payload, source, appPtyId)
           }
-          this.retryRejectedPtyDelivery(payload, source, appPtyId)
         },
         (error: unknown) => {
           console.warn(`[ssh-relay-session] PTY ${relayPtyId} targeted delivery recovery failed`, {
@@ -1886,7 +1875,7 @@ export class SshRelaySession {
 
   // Why liveness is checked before retrying: reattachKnownPty resolves without claiming the lease
   // when the PTY exited mid-attach, which is indistinguishable from a failed reattach at the call
-  // site. Retrying that race twice would drop the relay channel over an ordinary PTY exit.
+  // site, so an ordinary exit would otherwise burn the whole recovery budget on attach round trips.
   private retryRejectedPtyDelivery(
     payload: SshPtyDataPayload,
     source: SshPtyDataPayload['source'],
