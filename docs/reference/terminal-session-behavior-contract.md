@@ -124,6 +124,18 @@ startup-blocking probe of a host nothing has asked for.
 
 ---
 
+## Test the call site, not the capability
+
+A guard that exists and is never passed is indistinguishable from no guard.
+`mayCreate` was added to `persistPtyBinding`, was correct, and had no
+production caller for several commits — every store-level test passed the whole
+time, because they called the store directly.
+
+So for anything that refuses a destructive action, pin the **caller**: assert
+that the reattach path passes the refusal, not merely that the store honours it
+when asked. The same applies to a classifier — assert the branch that consumes
+its verdict is reachable, since a guard behind an unreachable `catch` is dead.
+
 ## Deliberately not required
 
 A durable event journal, per-consumer cumulative delivery cursors, and
