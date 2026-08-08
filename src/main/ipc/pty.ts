@@ -7242,6 +7242,12 @@ export function registerPtyHandlers(
 
   ipcMain.removeAllListeners('pty:signal')
   ipcMain.on('pty:signal', (_event, args: { id: string; signal: string }) => {
+    // Why fenced but pty:kill is not: a signal means "interrupt MY pane", so a
+    // superseded id is a misdirected interrupt. A kill on a superseded id is the
+    // opposite — that PTY is now orphaned and reclaiming it is the point.
+    if (isSupersededPtyId(args.id)) {
+      return
+    }
     tryGetProviderForPty(args.id)
       ?.sendSignal(args.id, args.signal)
       .catch(() => {})

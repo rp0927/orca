@@ -80,7 +80,7 @@ describe('superseded PTY operation fence', () => {
 describe('the fence is wired into every mutating handler', () => {
   // The capability existed for months and was never called from these handlers.
   // Pin the call site, not the capability — that is the failure this program hit.
-  it.each(['pty:write', 'pty:writeAccepted', 'pty:resize'])(
+  it.each(['pty:write', 'pty:writeAccepted', 'pty:resize', 'pty:signal'])(
     '%s consults the fence',
     async (channel) => {
       const { readFileSync } = await import('node:fs')
@@ -93,4 +93,14 @@ describe('the fence is wired into every mutating handler', () => {
       expect(source.slice(start, start + 700)).toContain('isSupersededPtyId')
     }
   )
+
+  // pty:kill is deliberately NOT fenced: a superseded PTY is orphaned, and
+  // reclaiming it is exactly what the orphan-cleanup callers ask for.
+  it('leaves pty:kill unfenced on purpose', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync('src/main/ipc/pty.ts', 'utf-8')
+    const start = source.search(/ipcMain\.handle\(\s*'pty:kill'/)
+    expect(start).toBeGreaterThan(0)
+    expect(source.slice(start, start + 500)).not.toContain('isSupersededPtyId')
+  })
 })
