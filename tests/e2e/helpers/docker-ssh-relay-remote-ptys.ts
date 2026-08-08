@@ -38,15 +38,21 @@ for proc in /proc/[0-9]*; do
   pts="$(readlink "$proc/fd/0" 2>/dev/null)"
   case "$pts" in /dev/pts/*) ;; *) continue ;; esac
   pane=; tab=; worktree=
+  [ -r "$proc/environ" ] || continue
   while IFS= read -r -d '' entry; do
     case "$entry" in
       ORCA_PANE_KEY=*) pane="\${entry#ORCA_PANE_KEY=}" ;;
       ORCA_TAB_ID=*) tab="\${entry#ORCA_TAB_ID=}" ;;
       ORCA_WORKTREE_ID=*) worktree="\${entry#ORCA_WORKTREE_ID=}" ;;
     esac
-  done < "$proc/environ"
+  done < "$proc/environ" || continue
   printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "\${proc##*/}" "$ppid" "$pts" "\${pane:--}" "\${tab:--}" "\${worktree:--}"
 done
+# Why: a shell that exits a proc scan should not fail the census. /proc entries
+# vanish mid-scan, and the last one that does would otherwise leave a non-zero
+# status that discards every row already printed. Malformed rows are still
+# rejected on parse, and docker's own failures never reach this line.
+exit 0
 `
 
 function optional(value: string | undefined): string | null {

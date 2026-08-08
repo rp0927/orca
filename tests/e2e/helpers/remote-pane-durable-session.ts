@@ -1,6 +1,5 @@
 /**
- * Durable (main-process) view of an SSH host's terminal panes, plus the
- * snapshot write the app itself performs when a pane goes away.
+ * Durable (main-process) view of an SSH host's terminal panes.
  *
  * Why durable and not the renderer store: a reconnect binds PTYs in main. A
  * pane grafted there is invisible to the running renderer and only surfaces on
@@ -56,44 +55,4 @@ export async function readDurablePaneBindings(
     },
     { hostId, worktreeId, localPartition: LOCAL_PARTITION }
   )
-}
-
-/**
- * Persist the post-close layout the way quit/beforeunload does — a full replace
- * of the host partition that no longer names the closed pane. The remote shell
- * and its lease are deliberately left alone: that divergence (a live lease with
- * no durable pane) is the state a reconnect must not resolve by inventing UI.
- */
-export async function persistClosedRemotePaneSnapshot(
-  page: Page,
-  args: { hostId: string; tabId: string; keptLeafId: string; closedLeafId: string }
-): Promise<void> {
-  await page.evaluate(async ({ hostId, tabId, keptLeafId, closedLeafId }) => {
-    const session = (await window.api.session.get(hostId)) as DurableSession | null
-    const layout = session?.terminalLayoutsByTabId?.[tabId]
-    if (!session || !layout) {
-      throw new Error(`No durable layout for tab ${tabId} on ${hostId}`)
-    }
-    const ptyIdsByLeafId = { ...layout.ptyIdsByLeafId }
-    delete ptyIdsByLeafId[closedLeafId]
-    const incarnations = { ...session.terminalPtyIncarnationsByPaneKey }
-    delete incarnations[`${tabId}:${closedLeafId}`]
-    await window.api.session.set(
-      {
-        ...session,
-        terminalLayoutsByTabId: {
-          ...session.terminalLayoutsByTabId,
-          [tabId]: {
-            ...layout,
-            root: { type: 'leaf', leafId: keptLeafId },
-            activeLeafId: keptLeafId,
-            expandedLeafId: null,
-            ptyIdsByLeafId
-          }
-        },
-        terminalPtyIncarnationsByPaneKey: incarnations
-      } as never,
-      hostId
-    )
-  }, args)
 }

@@ -11,33 +11,40 @@
  *    relay hosts, on the container, and pinning their PIDs.
  *
  * 2. 'leaves a lease whose durable pane is gone unbound…' discriminates. It
- *    reproduces the divergence — a live lease and a live remote shell that no
- *    durable pane names — and fails on a tree without the fix, where reattach
- *    grafts the pane back through persistPtyBinding's creating branches.
+ *    seeds the divergence — a live lease and a live remote shell that no durable
+ *    pane names — and fails on a tree without the fix, where reattach grafts the
+ *    pane back through persistPtyBinding's creating branches. The graft lands in
+ *    the 'local' partition, because the reattach call site passes no hostId, so
+ *    the census reads both partitions; one alone passes on either tree.
  */
 import type { Page, TestInfo } from '@stablyai/playwright-test'
+import { randomUUID } from 'node:crypto'
 import { test, expect } from './helpers/orca-app'
 import { ensureTerminalVisible, waitForActiveWorktree, waitForSessionReady } from './helpers/store'
 import {
-  closeActiveTerminalPane,
-  focusLastTerminalPane,
   sendToTerminal,
   splitActiveTerminalPane,
   waitForActivePanePtyId,
   waitForActiveTerminalManager,
   waitForPaneIdentitySnapshot
 } from './helpers/terminal'
+import { readDurablePaneBindings, sshExecutionHostId } from './helpers/remote-pane-durable-session'
+import { seedUnboundRemotePtyLease } from './helpers/unbound-remote-pty-lease'
 import {
-  persistClosedRemotePaneSnapshot,
-  readDurablePaneBindings,
-  sshExecutionHostId
-} from './helpers/remote-pane-durable-session'
+  describeSshRemotePtyLeases,
+  findSshRemotePtyLeaseForLeaf,
+  readSshRemotePtyLeases,
+  resolveOrcaProfileStateFile
+} from './helpers/ssh-remote-pty-lease-file'
 import {
   cleanupDockerSshRelayTarget,
   startDockerSshRelayTarget,
   type DockerSshRelayTarget
 } from './helpers/docker-ssh-relay-target'
-import { connectDockerSshRelayTarget } from './helpers/docker-ssh-relay-connection'
+import {
+  connectDockerSshRelayTarget,
+  reconnectDockerSshRelayTarget
+} from './helpers/docker-ssh-relay-connection'
 import { severDockerSshRelayTransport } from './helpers/docker-ssh-relay-processes'
 import {
   countDockerSshRelayRemoteStreamWriters,
@@ -261,69 +268,128 @@ test.describe('SSH reconnect pane and remote PTY cardinality', () => {
     }
   })
 
-  // The divergence the field hit: a lease and its remote shell outlive the pane
-  // record, because the pane was closed while the link was down and the kill
-  // never reached the host. Reconnect must reattach without inventing the pane
-  // back, and without killing the shell it can no longer place.
+  // The divergence the field hit: a live lease and a live remote shell that no
+  // durable pane names. Reconnect must reattach without inventing the pane back,
+  // and without killing the shell it can no longer place.
+  //
+  // The precondition is seeded, not induced. Inducing it by closing a pane over
+  // a severed transport is a race the induction loses: once the sever tears the
+  // SSH providers down, `pty:kill` takes its tombstone branch and terminates the
+  // lease, reattach never fans out over it, and every oracle downstream passes
+  // vacuously on both trees. See helpers/unbound-remote-pty-lease.ts.
+  //
+  // Why an explicit disconnect/reconnect rather than a transport sever: only the
+  // detach path moves the lease attached -> detached, which makes the flip back
+  // to attached positive proof that reattach reached this exact lease. A severed
+  // link reconnects with the lease still marked attached, so nothing on disk
+  // separates "reattached and refused to bind" from "never visited".
   test('leaves a lease whose durable pane is gone unbound instead of grafting the pane back', async ({
-    orcaPage
+    orcaPage,
+    electronApp
   }, testInfo: TestInfo) => {
     test.setTimeout(480_000)
     let target: DockerSshRelayTarget | null = null
     try {
       target = startDockerSshRelayTarget(testInfo)
       const relayTarget = target
-      const { remote, paneSnapshot, baselineRemotePtys } = await openStreamingRemotePanes(
-        orcaPage,
-        relayTarget
-      )
-      const baselinePids = baselineRemotePtys.map((pty) => pty.pid)
+      const { remote, paneSnapshot } = await openStreamingRemotePanes(orcaPage, relayTarget)
       const hostId = sshExecutionHostId(remote.targetId)
-      const keptLeafId = paneSnapshot.panes[0]!.leafId
-      const closedLeafId = paneSnapshot.panes[1]!.leafId
+      const stateFile = await resolveOrcaProfileStateFile(electronApp)
       const readBindings = (): Promise<string[]> =>
         readDurablePaneBindings(orcaPage, hostId, remote.worktreeId)
-      expect(
-        (await readBindings()).filter((binding) => binding.includes(closedLeafId)),
-        'the pane to be closed must start out durably bound'
-      ).not.toHaveLength(0)
+      const livePids = (): number[] =>
+        readDockerSshRelayRemotePtys(relayTarget)
+          .map((pty) => pty.pid)
+          .sort((left, right) => left - right)
 
-      severDockerSshRelayTransport(relayTarget)
-      // Closing here is what leaves the lease orphaned: pty:kill fails with the
-      // transport down, so the remote shell and its lease both survive the pane.
-      await focusLastTerminalPane(orcaPage)
-      await closeActiveTerminalPane(orcaPage)
-      await expect
-        .poll(
-          async () => (await readRemotePaneCensus(orcaPage, remote.worktreeId)).paneIds.length,
-          {
-            timeout: 30_000,
-            message: 'the closed pane never left the visible layout'
-          }
-        )
-        .toBe(PANE_COUNT - 1)
-      await persistClosedRemotePaneSnapshot(orcaPage, {
+      const unbound = await seedUnboundRemotePtyLease(orcaPage, {
+        targetId: remote.targetId,
         hostId,
+        worktreeId: remote.worktreeId,
         tabId: paneSnapshot.tabId,
-        keptLeafId,
-        closedLeafId
+        leafId: randomUUID()
       })
+      // A live source, like the panes: an idle PTY reattaches as 'existing' and
+      // never enters the source re-establishment the field failure came through.
+      const unboundMarker = `SSH_UNBOUND_STREAM_${Date.now()}`
+      await sendToTerminal(
+        orcaPage,
+        unbound.ptyId,
+        `node -e "setInterval(()=>process.stdout.write('${unboundMarker}_'+Date.now()+'\\n'),100)"\r`
+      )
       await expect
-        .poll(async () => (await readBindings()).filter((b) => b.includes(closedLeafId)).length, {
-          timeout: 30_000,
-          message: 'a durable partition still named the closed pane before the reconnect'
+        .poll(() => countDockerSshRelayRemoteStreamWriters(relayTarget, unboundMarker), {
+          timeout: 60_000,
+          message: 'the unbound remote PTY never started streaming'
         })
-        .toBe(0)
-      const survivingBindings = await readBindings()
+        .toBe(1)
+      await expect
+        .poll(() => readDockerSshRelayRemotePtys(relayTarget).length, {
+          timeout: 60_000,
+          message: 'the relay did not settle at one shell per pane plus the unbound one'
+        })
+        .toBe(PANE_COUNT + 1)
+      const seededPtys = readDockerSshRelayRemotePtys(relayTarget)
+      const seededPids = seededPtys.map((pty) => pty.pid).sort((left, right) => left - right)
+      // The seeded shell is the pane-key-less one: ORCA_PANE_KEY is injected by
+      // the pane launch path, which a leaf that never becomes a pane never runs.
+      for (const pane of paneSnapshot.panes) {
+        expect(
+          seededPtys.map((pty) => pty.paneKey),
+          `pane ${pane.leafId} lost the remote shell it owns`
+        ).toContain(`${paneSnapshot.tabId}:${pane.leafId}`)
+      }
       expect(
-        survivingBindings.filter((binding) => binding.includes(keptLeafId)),
-        'the surviving pane must stay durably bound'
-      ).not.toHaveLength(0)
+        seededPtys.filter((pty) => pty.paneKey === null),
+        'the seeded remote shell is not separable from the pane-owned ones'
+      ).toHaveLength(1)
+      testInfo.annotations.push({
+        type: 'ssh-reconnect-unbound-lease-seeded',
+        description: describeDockerSshRelayRemotePtys(seededPtys)
+      })
 
+      const seededLease = findSshRemotePtyLeaseForLeaf(stateFile, remote.targetId, unbound.leafId)
+      expect(seededLease?.state, 'the seeded remote PTY never took a live lease').toBe('attached')
+      const attachedBeforeReconnect = seededLease?.lastAttachedAt ?? 0
+      const bindingsBeforeReconnect = await readBindings()
+      expect(
+        bindingsBeforeReconnect.filter((binding) => binding.includes(unbound.leafId)),
+        'no durable partition may name the unbound leaf before the reconnect'
+      ).toHaveLength(0)
+      for (const pane of paneSnapshot.panes) {
+        expect(
+          bindingsBeforeReconnect.filter((binding) => binding.includes(pane.leafId)),
+          `pane ${pane.leafId} must start out durably bound`
+        ).not.toHaveLength(0)
+      }
+
+      await reconnectDockerSshRelayTarget(orcaPage, remote.targetId)
       await waitForSshReconnected(orcaPage, remote.targetId)
       await ensureTerminalVisible(orcaPage, 45_000)
       await waitForActiveTerminalManager(orcaPage, 60_000)
       await waitForActivePanePtyId(orcaPage, 60_000)
+
+      // Vacuity guard. Detach marked this lease 'detached'; only reattachKnownPtys
+      // marks it 'attached' again, and only after visiting it. Without this, a
+      // reattach that silently skipped the lease would be indistinguishable from
+      // one that correctly refused to bind it, and the census below would prove
+      // nothing.
+      await expect
+        .poll(
+          () =>
+            findSshRemotePtyLeaseForLeaf(stateFile, remote.targetId, unbound.leafId)
+              ?.lastAttachedAt ?? 0,
+          {
+            timeout: 120_000,
+            message:
+              'reconnect never reattached the unbound lease, so the pane census below is vacuous'
+          }
+        )
+        .toBeGreaterThan(attachedBeforeReconnect)
+      testInfo.annotations.push({
+        type: 'ssh-reconnect-unbound-lease-reattached',
+        description: describeSshRemotePtyLeases(readSshRemotePtyLeases(stateFile, remote.targetId))
+      })
 
       // Sample continuously rather than poll-until-equal: a graft that lands and
       // is later overwritten by a renderer snapshot would satisfy a poll that
@@ -331,26 +397,24 @@ test.describe('SSH reconnect pane and remote PTY cardinality', () => {
       const deadline = Date.now() + 25_000
       let samples = 0
       while (Date.now() < deadline) {
-        expect(await readBindings(), 'reconnect grafted a pane the user had closed').toEqual(
-          survivingBindings
-        )
+        expect(
+          await readBindings(),
+          'reconnect grafted a durable pane for a lease no pane owns'
+        ).toEqual(bindingsBeforeReconnect)
         samples += 1
         await orcaPage.waitForTimeout(500)
       }
       expect(samples).toBeGreaterThan(10)
 
-      // Unknown is not dead: the orphaned shell keeps running, so a later
-      // reattach can still claim it once a durable pane names it again.
-      expect(
-        readDockerSshRelayRemotePtys(relayTarget).map((pty) => pty.pid),
-        'the orphaned remote shell was killed or respawned'
-      ).toEqual(baselinePids)
+      // Unknown is not dead: the unbound shell keeps running, so a later reattach
+      // can still claim it once a durable pane names it again.
+      expect(livePids(), 'the unbound remote shell was killed or respawned').toEqual(seededPids)
       expect(
         (await readRemotePaneCensus(orcaPage, remote.worktreeId)).paneIds,
         'reconnect surfaced a pane the user never opened'
-      ).toHaveLength(PANE_COUNT - 1)
+      ).toHaveLength(PANE_COUNT)
       testInfo.annotations.push({
-        type: 'ssh-reconnect-orphaned-lease-final',
+        type: 'ssh-reconnect-unbound-lease-final',
         description: describeDockerSshRelayRemotePtys(readDockerSshRelayRemotePtys(relayTarget))
       })
     } finally {

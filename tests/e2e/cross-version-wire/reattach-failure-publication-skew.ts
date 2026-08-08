@@ -1,5 +1,9 @@
 import { expect, vi } from 'vitest'
-import { importBuildModule, type TerminalWireBuild, type WireCodec } from './versioned-terminal-wire'
+import {
+  importBuildModule,
+  type TerminalWireBuild,
+  type WireCodec
+} from './versioned-terminal-wire'
 
 /**
  * The second half of the cross-version contract: not "does the frame decode", but
