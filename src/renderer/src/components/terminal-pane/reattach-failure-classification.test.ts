@@ -31,7 +31,7 @@ describe('reattach failure classification', () => {
     ['a disconnected client', new Error('client_disconnected')],
     ['an unavailable owner', new Error('execution_owner_unavailable')],
     ['an identity mismatch', new Error('SSH_PTY_IDENTITY_MISMATCH')],
-    ['an empty message', new Error('')],
+    ['an empty rejection value', ''],
     ['a non-Error rejection', 'something went wrong']
   ])('does not treat %s as proof', (_label, error) => {
     expect(isProvenSshSessionGoneError(error)).toBe(false)
