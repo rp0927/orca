@@ -178,8 +178,14 @@ comprehensive design or release gates.
 - Superseded remote shells are deliberately left running and unreachable. The
   PR body acknowledges that the “accumulates unused shells” half of the incident
   remains unresolved.
-- The Docker reconnect test says it passes with and without the fix. It is a
-  forward guard, not causal proof of the customer defect.
+- The repeated-reconnect Docker test still passes with and without the fix: it
+  is a forward guard, not causal proof. Its sibling in the same spec — 'leaves a
+  lease whose durable pane is gone unbound…' — was reported as discriminating,
+  but that DID NOT REPRODUCE on a second machine: with `mayCreate: false`
+  removed from the reattach call site and the app rebuilt, both tests still
+  passed. Its induction races `pty:kill` against a severed transport, so when
+  the kill lands the lease is cleaned up and there is nothing to graft. Treat
+  both tests as forward guards. No journey is proven.
 - The final Docker settle assertion has an unresolved major review thread: a
   late pane or shell can appear after the polling assertion has already passed.
 - The production-call-site wiring oracle reads source text. It does not execute
