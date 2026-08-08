@@ -28,6 +28,19 @@ not. Retry count never decides identity or liveness.
 This is deliberately weaker than "no timers". Recovery budgets and scratch-file
 age-gates are correct code and must stay.
 
+Two patterns make a retention bound safe, and both beat shortening it:
+
+- measure **process time**, not wall clock, so a suspended laptop does not
+  burn the budget;
+- gate aggressive reclamation on an **independent observation** — a second
+  consecutive scan, or another client completing a handshake — so the clock
+  bounds a wait while evidence authorizes the act.
+
+**B** — respawn requires proof. A failure that does not prove the session is
+gone is unresolved: leave the shell running and keep the binding. An
+unrecognized failure must never become a respawn, because a duplicated shell
+is worse than a stalled one.
+
 ## B. Attach binds; it never creates
 
 An ambiguous, unavailable, or rejected attach does not spawn a shell and does
@@ -67,6 +80,17 @@ twice after a replay.
 Bounded replay plus idempotent application by event key satisfies this. A
 durable per-consumer delivery cursor is not required, and is not currently
 used.
+
+**Lifecycle is state, not an event.** An exit that happens while nothing is
+attached is not recovered from a delivery channel — it is read during the
+attach handshake. The attach reply should carry whether the session is alive
+or exited, its exit code, and the resume offset. That is what removes the need
+to guarantee delivery of an exit _event_, and it is why no journal is required
+here.
+
+Where a resume offset cannot be served, advance the offset explicitly by the
+size of the gap and persist the running total, so "output was lost here" stays
+a queryable fact rather than a silent discontinuity.
 
 ## F. Isolation
 
