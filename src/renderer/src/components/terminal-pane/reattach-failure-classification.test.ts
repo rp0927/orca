@@ -6,7 +6,10 @@
  * Respawn requires proof the session is gone. These pin which failures qualify.
  */
 import { describe, expect, it } from 'vitest'
-import { isProvenSshSessionGoneError } from './reattach-failure-classification'
+import {
+  describeReattachFailure,
+  isProvenSshSessionGoneError
+} from './reattach-failure-classification'
 
 describe('reattach failure classification', () => {
   it('treats an explicit host expiry as proof', () => {
@@ -40,5 +43,17 @@ describe('reattach failure classification', () => {
   // A new failure mode must not silently become a respawn.
   it('defaults an unrecognized failure to unresolved', () => {
     expect(isProvenSshSessionGoneError(new Error('SOME_FUTURE_RELAY_ERROR'))).toBe(false)
+  })
+})
+
+describe('reattach failure description', () => {
+  it('keeps the wire token out of the pane', () => {
+    const shown = describeReattachFailure(new Error('SSH_SOURCE_RESTORE_REQUIRED: ssh-1:pty-9'))
+    expect(shown).not.toContain('SSH_SOURCE_RESTORE_REQUIRED')
+    expect(shown).toMatch(/re-established/i)
+  })
+
+  it('passes an ordinary failure through unchanged', () => {
+    expect(describeReattachFailure(new Error('read ECONNRESET'))).toBe('read ECONNRESET')
   })
 })

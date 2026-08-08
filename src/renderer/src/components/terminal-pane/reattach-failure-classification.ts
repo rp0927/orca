@@ -28,3 +28,12 @@ export function isProvenSshSessionGoneError(error: unknown): boolean {
   }
   return message.includes(SSH_SESSION_EXPIRED_ERROR) || /PTY ".+" not found/i.test(message)
 }
+
+/** Keeps wire tokens out of the pane; the shell is still running either way. */
+export function describeReattachFailure(error: unknown): string {
+  const message = messageOf(error)
+  if (message.includes(SSH_SOURCE_RESTORE_REQUIRED_ERROR)) {
+    return 'Reconnecting this terminal — its output stream is being re-established.'
+  }
+  return message
+}

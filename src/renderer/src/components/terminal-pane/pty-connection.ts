@@ -335,7 +335,10 @@ import {
 import type { DirectSshPaneRetryAttempt } from '@/store/slices/direct-ssh-terminal-recovery'
 import { directSshAuthoritiesEqual } from '@/store/slices/direct-ssh-terminal-authority-ledger'
 import { isLatinShortcutKey } from '@/lib/ime-latin-shortcut-key'
-import { isProvenSshSessionGoneError } from './reattach-failure-classification'
+import {
+  describeReattachFailure,
+  isProvenSshSessionGoneError
+} from './reattach-failure-classification'
 
 const pendingSpawnByPaneKey = new Map<string, Promise<string | null>>()
 const SSH_SESSION_EXPIRED_ERROR = 'SSH_SESSION_EXPIRED'
@@ -8788,14 +8791,15 @@ export function connectPanePty(
                 if (rejectObsoleteDirectSshReattach(pendingSessionId)) {
                   return
                 }
-                if (isSshSessionExpiredError(err)) {
-                  deps.clearExitedPanePtyLayoutBinding(pane.id, pendingSessionId)
-                  deps.clearTabPtyId(deps.tabId, pendingSessionId)
-                  startFreshColdRestoreAgentResume(coldRestoreStartup, {
-                    forceBlankRestoredViewport: true
-                  })
+                // Why: only proof that the session is gone may respawn. Anything
+                // else leaves the shell running, because respawning with the
+                // restored id resumes the same agent session a second time.
+                if (!isProvenSshSessionGoneError(err)) {
+                  reportError(describeReattachFailure(err))
                   return
                 }
+                deps.clearExitedPanePtyLayoutBinding(pane.id, pendingSessionId)
+                deps.clearTabPtyId(deps.tabId, pendingSessionId)
                 startFreshColdRestoreAgentResume(coldRestoreStartup, {
                   forceBlankRestoredViewport: true
                 })
@@ -9038,7 +9042,7 @@ export function connectPanePty(
           // leaves the shell running, and respawning there resumes the same
           // agent session a second time into one transcript.
           if (!isProvenSshSessionGoneError(err)) {
-            reportError(message)
+            reportError(describeReattachFailure(err))
             return
           }
           deps.clearExitedPanePtyLayoutBinding(pane.id, deferredReattachSessionId)
