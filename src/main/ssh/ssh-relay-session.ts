@@ -2196,6 +2196,14 @@ export class SshRelaySession {
     mux: SshChannelMultiplexer,
     shouldContinue: () => boolean
   ): Promise<void> {
+    // Why: installs predating pane-keyed supersession carry duplicate live leases;
+    // fanning out over them is what grafted panes the user never opened (STA-3077).
+    const retired = this.store.supersedeDuplicatePaneLeases(this.targetId)
+    if (retired > 0) {
+      console.info(
+        `[ssh-relay-session] Retired ${retired} duplicate pane lease(s) for ${this.targetId}; their remote shells are left running.`
+      )
+    }
     const activeLeases = this.store
       .getSshRemotePtyLeases(this.targetId)
       .filter((lease) => lease.state !== 'terminated' && lease.state !== 'expired')

@@ -124,6 +124,39 @@ describe('STA-3077: superseding a lease scrubs only the predecessor binding', ()
   })
 })
 
+describe('STA-3077: existing duplicate leases are healed, not revived', () => {
+  // Installs that predate pane-keyed supersession already carry the duplicates
+  // this bug accumulated. Preventing new ones does not help them.
+  it('retires every stale duplicate for a pane and keeps the newest', async () => {
+    const store = await createStore({
+      sshRemotePtyLeases: Array.from({ length: 20 }, (_, index) => ({
+        ...leaseFor(`relay-pty-${index}`, index + 1),
+        createdAt: index + 1
+      }))
+    })
+
+    const retired = store.supersedeDuplicatePaneLeases(TARGET)
+
+    expect(retired).toBe(19)
+    expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-19'])
+  })
+
+  it('leaves distinct panes alone', async () => {
+    const otherLeaf = '8a2b4c6d-1e3f-4a5b-8c7d-9e0f1a2b3c4d'
+    const store = await createStore({
+      sshRemotePtyLeases: [
+        { ...leaseFor('relay-pty-a', 1), createdAt: 1 },
+        { ...leaseFor('relay-pty-b', 2), createdAt: 2, leafId: otherLeaf }
+      ]
+    })
+
+    expect(store.supersedeDuplicatePaneLeases(TARGET)).toBe(0)
+    expect(store.getSshRemotePtyLeases(TARGET).filter((l) => l.state === 'attached')).toHaveLength(
+      2
+    )
+  })
+})
+
 describe('STA-3077: reattach binds panes, it never creates them', () => {
   // RC3: persistPtyBinding has four creating branches (mint tab, mint root leaf,
   // split root and graft leaf, mint layout). They are load-bearing for spawn and
@@ -137,10 +170,8 @@ describe('STA-3077: reattach binds panes, it never creates them', () => {
       leafId: LEAF,
       ptyId: 'relay-pty-a',
       incarnationId: 'inc-a',
-      // A reattach must not grow topology. Expressed as the caller's intent so
-      // this oracle survives whatever option name the fix introduces.
       mayCreate: false
-    } as Parameters<typeof store.persistPtyBinding>[0])
+    })
 
     const session = store.getWorkspaceSession()
     expect(session.tabsByWorktree?.[WORKTREE] ?? []).toHaveLength(0)
@@ -159,7 +190,7 @@ describe('STA-3077: reattach binds panes, it never creates them', () => {
       ptyId: 'relay-pty-a',
       incarnationId: 'inc-a',
       mayCreate: false
-    } as Parameters<typeof store.persistPtyBinding>[0])
+    })
 
     expect(bound).toBe(false)
   })

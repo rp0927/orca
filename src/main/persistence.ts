@@ -1703,6 +1703,20 @@ function layoutContainsLeafId(node: TerminalPaneLayoutNode | null, leafId: strin
   return layoutContainsLeafId(node.first, leafId) || layoutContainsLeafId(node.second, leafId)
 }
 
+/** Total order so two leases for one pane resolve the same way on every host. */
+function isNewerSshRemotePtyLease(
+  candidate: SshRemotePtyLease,
+  incumbent: SshRemotePtyLease
+): boolean {
+  if (candidate.updatedAt !== incumbent.updatedAt) {
+    return candidate.updatedAt > incumbent.updatedAt
+  }
+  if (candidate.createdAt !== incumbent.createdAt) {
+    return candidate.createdAt > incumbent.createdAt
+  }
+  return candidate.ptyId > incumbent.ptyId
+}
+
 function cloneLayoutNode(node: TerminalPaneLayoutNode): TerminalPaneLayoutNode {
   if (node.type === 'leaf') {
     return { type: 'leaf', leafId: node.leafId }
@@ -7228,6 +7242,52 @@ export class Store {
     // Why: matching on lease ptyId first means this scrubs only the predecessor's
     // stale binding — the winner's own binding cannot match and is left intact.
     this.clearSshRemotePtyBindingsForLeases(winner.targetId, superseded)
+  }
+
+  /**
+   * Heals lease state that predates pane-keyed supersession. Existing installs
+   * carry the duplicates STA-3077 accumulated — one report reached 20 live
+   * leases for a handful of panes — and supersession alone only prevents new
+   * ones. Reattach calls this first so a stale predecessor cannot be revived.
+   *
+   * Returns the number of leases retired, for logging.
+   */
+  supersedeDuplicatePaneLeases(targetId: string): number {
+    const live = (this.state.sshRemotePtyLeases ?? []).filter(
+      (lease) =>
+        lease.targetId === targetId && lease.state !== 'terminated' && lease.state !== 'expired'
+    )
+    const winnerByPane = new Map<string, SshRemotePtyLease>()
+    for (const lease of live) {
+      if (!lease.worktreeId || !lease.tabId || !lease.leafId) {
+        continue
+      }
+      const paneKey = [lease.worktreeId, lease.tabId, lease.leafId].join('\0')
+      const incumbent = winnerByPane.get(paneKey)
+      if (!incumbent || isNewerSshRemotePtyLease(lease, incumbent)) {
+        winnerByPane.set(paneKey, lease)
+      }
+    }
+    if (winnerByPane.size === 0) {
+      return 0
+    }
+    const winners = new Set(winnerByPane.values())
+    const now = Date.now()
+    const superseded: SshRemotePtyLease[] = []
+    for (const lease of live) {
+      if (!lease.worktreeId || !lease.tabId || !lease.leafId || winners.has(lease)) {
+        continue
+      }
+      lease.state = 'expired'
+      lease.updatedAt = now
+      superseded.push(lease)
+    }
+    if (superseded.length === 0) {
+      return 0
+    }
+    this.clearSshRemotePtyBindingsForLeases(targetId, superseded)
+    this.flush()
+    return superseded.length
   }
 
   markSshRemotePtyLeases(targetId: string, state: SshRemotePtyLease['state']): void {
