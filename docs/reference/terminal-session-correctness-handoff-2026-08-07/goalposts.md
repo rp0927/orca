@@ -8,6 +8,31 @@ journeys**. Status may change only from evidence produced on the same rebased,
 converged release candidate. Historical snapshot tests and independently useful
 narrow PRs may be cited as partial evidence but cannot promote a row.
 
+## Recorded user decisions
+
+These amend the contract above. Only the user may add to this list.
+
+### D1 — G6 relaxed from strictly net-negative (2026-08-07)
+
+> "It's okay if we must increase LOC but try not to."
+
+G6's pass condition is no longer a strict inequality against the frozen
+baseline. It is now: **minimise added production code, and justify every net
+addition against the correctness it buys.** A net-positive total does not fail
+G6 on its own; an unjustified one does.
+
+Why this was needed: the deletion budget the plan assumed does not exist. An
+entrypoint-rooted import graph over all 20 real build entrypoints found that
+51 of the 53 candidate files in `src/relay/*pty-source-*`,
+`src/shared/pty-consumer-*`, and `src/main/ipc/ssh-pty-*` are reachable and
+value-instantiated on live paths. Only 2 files (263 LOC) are unreachable, and 2
+of the candidates did not exist at the baseline so deleting them earns no
+credit. Against roughly +1,021 LOC to offset, a strict inequality was not
+reachable without deleting load-bearing code — which the governing rule forbids.
+
+Still binding: correctness may not be weakened to reduce line count, and a
+replacement architecture added beside the old one does not earn its lines.
+
 ## Universal proof rule
 
 A gate is `proven` only when both exist:
