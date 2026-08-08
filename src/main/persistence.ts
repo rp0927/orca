@@ -6711,9 +6711,13 @@ export class Store {
       incarnationId?: string
       startupCwd?: string
       expectedBinding?: { ptyId: string; incarnationId?: string }
+      /** Reattach passes false: an absent durable pane never authorizes creating UI.
+       *  Defaults true so the spawn path keeps its force-quit-race branches. */
+      mayCreate?: boolean
     },
     hostId?: string | null
   ): boolean {
+    const mayCreate = args.mayCreate ?? true
     const resolvedHostId = this.resolveHostId(hostId)
     const session = this.getWorkspaceSession(resolvedHostId)
     const paneKey = `${args.tabId}:${args.leafId}`
@@ -6800,6 +6804,10 @@ export class Store {
         [args.worktreeId]: session.activeTabIdByWorktree?.[args.worktreeId] ?? args.tabId
       }
     }
+    if (!mayCreate && terminalMembershipChanged) {
+      restoreSession()
+      return false
+    }
     if (!isTerminalLeafId(args.leafId)) {
       // Why: keep legacy renderer-local pane ids out of durable leaf-keyed layout state after the UUID migration.
       advanceTopologyFence()
@@ -6849,6 +6857,10 @@ export class Store {
           ptyIdsByLeafId: { [args.leafId]: args.ptyId }
         }
       }
+    }
+    if (!mayCreate && terminalMembershipChanged) {
+      restoreSession()
+      return false
     }
     advanceTopologyFence()
     try {
@@ -7176,7 +7188,46 @@ export class Store {
     } else {
       this.state.sshRemotePtyLeases.push(next)
     }
+    this.supersedeSiblingLeasesForPane(next, now)
     this.flush()
+  }
+
+  /**
+   * One pane owns at most one live remote PTY. Without this, lease identity is
+   * `(targetId, ptyId)` alone, so a pane that re-leases under a new relay id
+   * leaves its predecessor live forever — reattach then fans out over both and
+   * grafts a pane the user never opened (STA-3077: 2 -> 19 -> 20 across three
+   * reconnects).
+   *
+   * Superseded leases are marked `expired`, not terminated: the remote shell is
+   * deliberately left running, because losing a lease is not proof the shell died.
+   */
+  private supersedeSiblingLeasesForPane(winner: SshRemotePtyLease, now: number): void {
+    if (!winner.worktreeId || !winner.tabId || !winner.leafId) {
+      return
+    }
+    if (winner.state === 'terminated' || winner.state === 'expired') {
+      return
+    }
+    const superseded: SshRemotePtyLease[] = []
+    for (const lease of this.state.sshRemotePtyLeases ?? []) {
+      if (
+        lease.ptyId !== winner.ptyId &&
+        lease.targetId === winner.targetId &&
+        lease.worktreeId === winner.worktreeId &&
+        lease.tabId === winner.tabId &&
+        lease.leafId === winner.leafId &&
+        lease.state !== 'terminated' &&
+        lease.state !== 'expired'
+      ) {
+        lease.state = 'expired'
+        lease.updatedAt = now
+        superseded.push(lease)
+      }
+    }
+    // Why: matching on lease ptyId first means this scrubs only the predecessor's
+    // stale binding — the winner's own binding cannot match and is left intact.
+    this.clearSshRemotePtyBindingsForLeases(winner.targetId, superseded)
   }
 
   markSshRemotePtyLeases(targetId: string, state: SshRemotePtyLease['state']): void {
