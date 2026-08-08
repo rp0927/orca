@@ -7362,6 +7362,9 @@ export function registerPtyHandlers(
     }
     const ownedConnectionId = ptyOwnership.get(args.id)
     const parsedSshId = ownedConnectionId === undefined ? parseAppSshPtyId(args.id) : null
+    // Why: before the cold-start daemon swap lands, the pre-swap local provider owns no
+    // daemon id and would answer an authoritative false for every restored session.
+    await getLocalPtyProviderStartupPromise(ownedConnectionId ?? parsedSshId?.connectionId)
     const provider = parsedSshId
       ? sshProviders.get(parsedSshId.connectionId)
       : tryGetProviderForPty(args.id)

@@ -6615,6 +6615,38 @@ describe('registerPtyHandlers', () => {
     expect(fallbackShutdown).not.toHaveBeenCalled()
   })
 
+  // Why: before the swap lands the pre-swap local provider owns no daemon id, so its
+  // "not in my table" would answer an authoritative dead for every restored session.
+  it('waits for the desktop startup barrier before pty:hasPty answers for a daemon id', async () => {
+    const barrier = makeDeferred()
+    const awaitLocalPtyProviderStartup = vi.fn(() => barrier.promise)
+    registerPtyHandlers(
+      mainWindow as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        awaitLocalPtyProviderStartup
+      }
+    )
+
+    const pending = handlers.get('pty:hasPty')!(null, { id: 'daemon-session' }) as Promise<
+      boolean | null
+    >
+    await Promise.resolve()
+    expect(awaitLocalPtyProviderStartup).toHaveBeenCalledTimes(1)
+
+    installObservableDaemonTestProvider()
+    ;(getLocalPtyProvider() as { hasPty?: (id: string) => boolean | null }).hasPty = vi.fn(
+      (id: string) => id === 'daemon-session'
+    )
+    barrier.resolve()
+
+    await expect(pending).resolves.toBe(true)
+  })
+
   it('waits for the desktop startup barrier before runtime local kills resolve the provider', async () => {
     const barrier = makeDeferred()
     const awaitLocalPtyProviderStartup = vi.fn(() => barrier.promise)
