@@ -3,7 +3,7 @@
 This file answers one question: **what exact evidence is required before an
 agent may write “proven”?**
 
-The current status is frozen at **0/8 proven goalposts** and **0/13 proven
+The current status is **0/8 proven goalposts** and **1/13 proven
 journeys**. Status may change only from evidence produced on the same rebased,
 converged release candidate. Historical snapshot tests and independently useful
 narrow PRs may be cited as partial evidence but cannot promote a row.
@@ -32,6 +32,38 @@ reachable without deleting load-bearing code — which the governing rule forbid
 
 Still binding: correctness may not be weakened to reduce line count, and a
 replacement architecture added beside the old one does not earn its lines.
+
+## Proven journeys
+
+### Journey 1 — Local macOS, Linux, and Windows (proven 2026-08-08)
+
+Oracle: `tests/e2e/local-terminal-restart-binding-identity.spec.ts`. Two tests —
+the same pane, full binding and OS shell process survive renderer reload and app
+restart; and a stale pre-spawn session write is rejected instead of retiring the
+live binding.
+
+Process identity is proved by the shell reporting its own pid through the
+production write path, plus the kernel-reported start time, so a recycled pid
+cannot pass as a survivor.
+
+| Platform                    | Result   | Discrimination watched                                                                                                                                          |
+| --------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS 26.3.1 arm64          | 2 passed | mutation reddens; restore greens                                                                                                                                |
+| Ubuntu 24.04 x86_64, native | 2 passed | 4 cycles, incl. deleting `restorableBindings` reconciliation — reddens test 2 only                                                                              |
+| Windows 11 26200, native    | 2 passed | A: forcing `shutdownDaemon()` in will-quit reddens test 1 (pid 13756 -> 8852, start times 5.4s apart). B: disabling the same reconciliation reddens test 2 only |
+
+Every run used an isolated TMPDIR, because the harness keys its seeded-repo
+pointer on a machine-global tmpdir path and concurrent runs can both fabricate
+and mask a red.
+
+Selectivity holds on two platforms: mutation B reddens only the stale-operation
+test and leaves the restart test green, so the two clauses are independently
+proved rather than jointly.
+
+Residual limit, stated: "every stale exact operation" is proved for the
+pre-spawn session-write class. Local `pty:write`/`resize`/`signal` are fenced by
+`isSupersededPtyId` with its own oracle, but that fence compares a binding, not
+an incarnation — see `binding-identity-design.md`.
 
 ## Universal proof rule
 

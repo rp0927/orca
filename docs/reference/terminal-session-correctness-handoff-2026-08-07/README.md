@@ -3,7 +3,7 @@
 > **Status: preserved and paused, not complete, not release-ready.**
 >
 > The comprehensive program is at **0/8 proven goalposts** and
-> **0/13 proven journeys**. No agent may narrow, replace, or mark a goalpost
+> **1/13 proven journeys**. No agent may narrow, replace, or mark a goalpost
 > complete without the user's explicit approval and the proof named in this
 > folder.
 
@@ -88,7 +88,7 @@ was added beside the old one.
 | -------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Construction preservation  | **Complete locally; not remotely durable**    | The 814-path construction tree and the original three authority documents are preserved at local branch `nwparker/react185-authority-snapshot` / `fddb19f6977`. |
 | Comprehensive goalposts    | **0/8 proven**                                | G0–G4 and G6 are partial. G5 and G7 are not started.                                                                                                            |
-| Required journeys          | **0/13 proven**                               | Focused and historical evidence exists, but no journey has its complete production oracle on the converged release tree.                                        |
+| Required journeys          | **1/13 proven**                               | Journey 1 has a discriminating oracle run natively on macOS, Linux and Windows. The other twelve remain unproven.                                               |
 | Current branch / PR #13111 | **Implemented, open, unapproved, incomplete** | Useful narrow SSH containment; not a long-term completion and not merged.                                                                                       |
 | PR #13110                  | **Open, independent, unapproved**             | Useful preload artifact guard; not shipped and has an unresolved major review thread.                                                                           |
 | Less-code gate             | **Failed on current candidate**               | PR #13111 is net positive; the preserved construction snapshot is net `+60,903` production LOC.                                                                 |
@@ -104,7 +104,7 @@ The numeric release checkpoint is therefore:
 - **G6:** partial and currently failing its final LOC condition
 - **G7:** not started
 - **Total:** **0/8 proven, 6/8 partial, 2/8 not started**
-- **Journeys:** **0/13 proven**
+- **Journeys:** **1/13 proven** (Journey 1, natively on macOS, Linux and Windows)
 
 This is the **program artifact ledger**. Its partial G0, G1, G3, and G4 evidence
 exists only in the preserved construction snapshot and historical receipts. It
