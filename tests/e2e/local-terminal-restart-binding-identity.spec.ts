@@ -74,9 +74,21 @@ function seededRepoPathOrSkip(): string {
 
 /** Kernel-reported start time; distinguishes a survivor from a recycled PID. */
 function readOsProcessIdentity(pid: number): OsProcessIdentity {
-  const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-    encoding: 'utf8'
-  })
+  // Why two probes: `ps` does not exist on Windows, and a PID alone cannot tell
+  // a survivor from a reused number — both platforms must report a start time.
+  const startedAt = (
+    process.platform === 'win32'
+      ? execFileSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-Command',
+            `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).StartTime.ToString('o')`
+          ],
+          { encoding: 'utf8' }
+        )
+      : execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+  )
     .trim()
     .replace(/\s+/g, ' ')
   if (!startedAt) {
@@ -118,7 +130,12 @@ async function readShellProcessIdentity(
   // Why: the echoed command line also contains the marker, so match the
   // *expanded* value — only the shell's own output carries digits.
   const reported = new RegExp(`${marker}=(\\d+)`)
-  await execInTerminal(page, ptyId, `echo ${marker}=$$`)
+  // `$$` is POSIX; PowerShell exposes the same thing as `$PID`.
+  await execInTerminal(
+    page,
+    ptyId,
+    process.platform === 'win32' ? `echo ${marker}=$PID` : `echo ${marker}=$$`
+  )
   let pid: number | null = null
   await expect
     .poll(
