@@ -1,6 +1,7 @@
 # Design: one authoritative binding identity
 
-Status: **proposal, not accepted.** Written 2026-08-08 by the engineer who took
+Status: **superseded by the shipped server-side fence.** Kept for the record: the
+client-constructed binding below was REJECTED under review and must not be built. Written 2026-08-08 by the engineer who took
 the program over. Supersedes nothing until reviewed.
 
 ## The problem, stated once
@@ -135,3 +136,74 @@ double-applies an outcome, that conclusion changes. Nobody has yet.
 Every row must fail with its guard removed, verified under an isolated
 `TMPDIR` — the e2e harness keys its seeded-repo pointer on a machine-global
 tmpdir path, so a shared machine can both fabricate and mask a red.
+
+---
+
+# Post-review record (2026-08-08)
+
+## The proposal above was rejected, correctly
+
+Verified against the code, three load-bearing claims in it were false: there is
+no `WorktreeId` type; `PtyIncarnationId` is a bare `string` alias, not branded;
+and `incarnationId` is optional in the store and never reaches the renderer, so
+the side asked to construct the binding cannot. It was also a _second_ identity
+comparison beside `resolveStablePaneOwner` (`src/main/ipc/pty.ts:647`), which
+already resolves pane ownership against runtime and store and already throws
+`terminal_pane_owner_conflict` — with 9 call sites, all on spawn/adopt, none on
+a mutating handler. The fence existed; it was not being called.
+
+## What shipped instead
+
+`isSupersededPtyId` in `src/main/ipc/pty.ts`, consulted by `pty:write`,
+`pty:writeAccepted`, `pty:resize` and `pty:signal`. Main keeps `ptyPaneKey` and
+`paneKeyPtyId` in lock-step, so their disagreement is proof the caller's id was
+superseded. No wire change, no renderer change, nothing added to the input
+payload. `pty:kill` is deliberately exempt: a superseded PTY is orphaned and
+reclaiming it is the point.
+
+## Peer review of that shape
+
+Four comparable agent IDEs were studied. The verdict was to keep this shape.
+None sends a composite identity per keystroke; the one that fences keystrokes
+sends a single opaque server-minted scalar. The best peer formulation is _keep
+the id as the sole lookup key and make the second field a rejection predicate,
+never a key component_ — which is what this does, with the owner read from
+authority rather than accepted from the caller.
+
+## Known gap, stated precisely
+
+**The fence compares a binding, not an incarnation.** If a pane respawns under
+the _same_ ptyId, `paneKeyPtyId.get(paneKey) === ptyId` still holds and a write
+composed for the dead shell passes.
+
+The obvious remedy — mint a fresh ptyId on every spawn — is wrong here.
+`ptySessionIdForAgentCreateOperation` (`src/main/daemon/pty-session-id.ts:26`)
+is deterministic _by design_ so a replayed agent-create is idempotent rather
+than spawning a second shell. Randomising it would trade this narrow gap for a
+duplicate-spawn bug, which is worse.
+
+So the residual exposure is one path: an agent-create PTY dies, the same
+operation is replayed, the id is reproduced, and a caller holding a pre-death
+reference writes into the successor. Closing it needs the caller to carry the
+incarnation — the rejected proposal — or a per-attachment token, which is a wire
+change. Neither is justified by evidence today. Recorded rather than hidden.
+
+## Adopted from the peer review
+
+- The "no binding recorded" branch is an explicit, commented decision (permit),
+  not an accident — an omitted guard on an optional field is exactly how one
+  peer reintroduced this defect class.
+- A classifier's default must be non-destructive: unknown resolves to reattach,
+  and only a positive "session not found" authorises a respawn.
+
+## Not yet adopted, ranked
+
+1. Typed end-reason recorded at end time (`detached` vs `terminal-exited`), so a
+   user quit is not a resume candidate. Aimed squarely at duplicate resume.
+2. Compare-and-swap before any _delayed_ destructive write. Three-valued probes
+   stop us acting on unknown; CAS stops us acting on stale-known.
+3. Derive the pane inventory from the authority snapshot rather than merging into
+   a local store. A projection cannot grow; an accumulator can — which is what
+   2 -> 19 -> 20 was.
+4. Durable intent-to-kill, since kill is the reclamation path for orphaned leases
+   and a one-shot renderer broadcast should not be its only chance.
