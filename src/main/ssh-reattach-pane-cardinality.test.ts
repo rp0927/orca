@@ -187,6 +187,23 @@ describe('STA-3077: existing duplicate leases are healed, not revived', () => {
     expect(liveLeasesForPane(store).map((lease) => lease.ptyId)).toEqual(['relay-pty-bound'])
   })
 
+  // A retirement that is not durable must not be believed: it would read as
+  // retired in memory and attached on disk for the rest of the session.
+  it('rolls the retirement back when the durable write fails', async () => {
+    const store = await createStore({
+      sshRemotePtyLeases: [
+        { ...leaseFor('relay-pty-a', 1), createdAt: 1 },
+        { ...leaseFor('relay-pty-b', 2), createdAt: 2 }
+      ]
+    })
+    vi.spyOn(store, 'flushOrThrow').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+
+    expect(store.supersedeDuplicatePaneLeases(TARGET)).toBe(0)
+    expect(liveLeasesForPane(store)).toHaveLength(2)
+  })
+
   it('leaves distinct panes alone', async () => {
     const otherLeaf = '8a2b4c6d-1e3f-4a5b-8c7d-9e0f1a2b3c4d'
     const store = await createStore({

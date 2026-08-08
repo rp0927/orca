@@ -7326,10 +7326,16 @@ export class Store {
     const winners = new Set(winnerByPane.values())
     const now = Date.now()
     const superseded: SshRemotePtyLease[] = []
+    const restore: (() => void)[] = []
     for (const lease of live) {
       if (!lease.worktreeId || !lease.tabId || !lease.leafId || winners.has(lease)) {
         continue
       }
+      const { state, updatedAt } = lease
+      restore.push(() => {
+        lease.state = state
+        lease.updatedAt = updatedAt
+      })
       lease.state = 'expired'
       lease.updatedAt = now
       superseded.push(lease)
@@ -7337,9 +7343,49 @@ export class Store {
     if (superseded.length === 0) {
       return 0
     }
+    const sessionsBefore = this.cloneSshLeaseBindingSessions(targetId)
     this.clearSshRemotePtyBindingsForLeases(targetId, superseded)
-    this.flush()
+    try {
+      // Why flushOrThrow: flush() swallows write errors, which would leave these
+      // leases retired in memory but attached on disk for the rest of the session.
+      this.flushOrThrow()
+    } catch (err) {
+      for (const undo of restore) {
+        undo()
+      }
+      this.restoreSshLeaseBindingSessions(targetId, sessionsBefore)
+      console.error('[persistence] Failed to retire duplicate pane leases:', err)
+      return 0
+    }
     return superseded.length
+  }
+
+  private cloneSshLeaseBindingSessions(targetId: string): {
+    local?: WorkspaceSessionState
+    host?: WorkspaceSessionState
+  } {
+    const host = this.state.workspaceSessionsByHostId?.[toSshExecutionHostId(targetId)]
+    return {
+      ...(this.state.workspaceSession
+        ? { local: cloneWorkspaceSessionState(this.state.workspaceSession) }
+        : {}),
+      ...(host ? { host: cloneWorkspaceSessionState(host) } : {})
+    }
+  }
+
+  private restoreSshLeaseBindingSessions(
+    targetId: string,
+    sessions: { local?: WorkspaceSessionState; host?: WorkspaceSessionState }
+  ): void {
+    if (sessions.local) {
+      this.state.workspaceSession = sessions.local
+    }
+    if (sessions.host) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [toSshExecutionHostId(targetId)]: sessions.host
+      }
+    }
   }
 
   markSshRemotePtyLeases(targetId: string, state: SshRemotePtyLease['state']): void {
