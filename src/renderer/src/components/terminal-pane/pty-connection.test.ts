@@ -9267,7 +9267,9 @@ describe('connectPanePty', () => {
     transport.getPtyId.mockImplementation(() => activePtyId)
     transport.connect.mockImplementation(async ({ sessionId }: { sessionId?: string }) => {
       if (sessionId) {
-        throw new Error('restored session is gone')
+        // Proof the session is gone — only that may reach the spawn door. A bare
+        // fault is unresolved and deliberately does not respawn.
+        throw new Error('PTY "tab-pty" not found')
       }
       // Main answered the spawn by adopting a durable session instead.
       activePtyId = 'adopted-pty'

@@ -335,6 +335,7 @@ import {
 import type { DirectSshPaneRetryAttempt } from '@/store/slices/direct-ssh-terminal-recovery'
 import { directSshAuthoritiesEqual } from '@/store/slices/direct-ssh-terminal-authority-ledger'
 import { isLatinShortcutKey } from '@/lib/ime-latin-shortcut-key'
+import { isProvenSshSessionGoneError } from './reattach-failure-classification'
 
 const pendingSpawnByPaneKey = new Map<string, Promise<string | null>>()
 const SSH_SESSION_EXPIRED_ERROR = 'SSH_SESSION_EXPIRED'
@@ -9032,15 +9033,19 @@ export function connectPanePty(
             ptyId: deferredReattachSessionId,
             reason: message
           })
-          deps.clearExitedPanePtyLayoutBinding(pane.id, deferredReattachSessionId)
-          deps.clearTabPtyId(deps.tabId, deferredReattachSessionId)
-          if (connectionId && isSshSessionExpiredError(err)) {
-            startFreshColdRestoreAgentResume(coldRestoreStartup, {
-              forceBlankRestoredViewport: true
-            })
+          // Why: only proof that the session is gone may respawn. A transport
+          // fault, a wedged call, or a source that merely needs re-establishing
+          // leaves the shell running, and respawning there resumes the same
+          // agent session a second time into one transcript.
+          if (!isProvenSshSessionGoneError(err)) {
+            reportError(message)
             return
           }
-          reportError(message)
+          deps.clearExitedPanePtyLayoutBinding(pane.id, deferredReattachSessionId)
+          deps.clearTabPtyId(deps.tabId, deferredReattachSessionId)
+          if (!(connectionId && isSshSessionExpiredError(err))) {
+            reportError(message)
+          }
           startFreshColdRestoreAgentResume(coldRestoreStartup, {
             forceBlankRestoredViewport: true
           })
